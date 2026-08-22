@@ -16,3 +16,4 @@ pytesseract>=0.3.10      # also requires the Tesseract binary on PATH:
 
 # Dropbox folder sync (scripts/dropbox_sync.py)
 dropbox>=11.36
+pypdf>=4.0

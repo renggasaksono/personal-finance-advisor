@@ -61,16 +61,45 @@ def file_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def extract_text_pdfplumber(path: Path) -> str:
+class NeedPassword(Exception):
+    """Raised when a PDF is encrypted and no/incorrect password was supplied."""
+
+
+def is_encrypted(path: Path) -> bool:
+    from pypdf import PdfReader
+    try:
+        return PdfReader(str(path)).is_encrypted
+    except Exception:
+        return False
+
+
+def _check_password(path: Path, password: str | None) -> None:
+    """Raise NeedPassword unless the PDF opens with `password`."""
+    from pypdf import PdfReader
+    reader = PdfReader(str(path))
+    if not reader.is_encrypted:
+        return
+    if not password:
+        raise NeedPassword()
+    try:
+        if reader.decrypt(password) == 0:   # 0 == wrong password
+            raise NeedPassword()
+    except NeedPassword:
+        raise
+    except Exception as e:
+        raise NeedPassword() from e
+
+
+def extract_text_pdfplumber(path: Path, password: str | None = None) -> str:
     import pdfplumber
     parts = []
-    with pdfplumber.open(path) as pdf:
+    with pdfplumber.open(path, password=password or "") as pdf:
         for page in pdf.pages:
             parts.append(page.extract_text() or "")
     return "\n".join(parts)
 
 
-def ocr_pdf(path: Path, lang: str = "ind+eng") -> str:
+def ocr_pdf(path: Path, password: str | None = None, lang: str = "ind+eng") -> str:
     """Render each page and OCR it (for scanned statements)."""
     try:
         import pypdfium2 as pdfium
@@ -79,7 +108,7 @@ def ocr_pdf(path: Path, lang: str = "ind+eng") -> str:
         raise SystemExit("Scanned PDF needs pypdfium2 + pytesseract. "
                          "Run: pip install pypdfium2 pytesseract") from e
     text_parts = []
-    pdf = pdfium.PdfDocument(str(path))
+    pdf = pdfium.PdfDocument(str(path), password=password or None)
     try:
         for i in range(len(pdf)):
             page = pdf[i]
@@ -90,12 +119,14 @@ def ocr_pdf(path: Path, lang: str = "ind+eng") -> str:
     return "\n".join(text_parts)
 
 
-def extract_text(path: Path) -> tuple[str, str]:
-    """Return (text, method). Falls back to OCR when the PDF has no text layer."""
-    text = extract_text_pdfplumber(path)
+def extract_text(path: Path, password: str | None = None) -> tuple[str, str]:
+    """Return (text, method). Raises NeedPassword if the PDF is locked and the
+    password is missing/wrong. Falls back to OCR when there is no text layer."""
+    _check_password(path, password)
+    text = extract_text_pdfplumber(path, password)
     if len(text.strip()) >= 40:
         return text, "text"
-    return ocr_pdf(path), "ocr"
+    return ocr_pdf(path, password), "ocr"
 
 
 # --------------------------------------------------------------------------
@@ -232,11 +263,47 @@ def parse_statement_ai(text: str, model: str) -> list[dict]:
 # Ingest
 # --------------------------------------------------------------------------
 
+def _unlock(path: Path, batch_pw: str | None):
+    """Extract text, prompting for a password if the PDF is encrypted.
+
+    Returns (text, method, batch_pw). A password entered interactively is
+    returned so it can be reused for the rest of the batch. On failure returns
+    (None, None, batch_pw).
+    """
+    try:
+        text, method = extract_text(path, batch_pw)
+        return text, method, batch_pw
+    except NeedPassword:
+        pass
+
+    import getpass
+    print(f"  {path.name} is password-protected.")
+    for _ in range(3):
+        try:
+            pw = getpass.getpass(f"  Password for {path.name} "
+                                 "(hidden; not stored): ")
+        except (EOFError, KeyboardInterrupt):
+            return None, None, batch_pw
+        if not pw:
+            return None, None, batch_pw
+        try:
+            text, method = extract_text(path, pw)
+            return text, method, pw     # reuse for later files in the batch
+        except NeedPassword:
+            print("  ! wrong password, try again.")
+    return None, None, batch_pw
+
+
 def ingest(paths: list[Path], db_path: Path, account: str | None,
            source_type: str | None, use_ai: bool, model: str,
-           dry_run: bool, force: bool, redact: bool = True) -> int:
+           dry_run: bool, force: bool, redact: bool = True,
+           password: str | None = None) -> int:
     conn = connect(db_path)
     total_inserted = 0
+    # Password precedence: explicit arg -> env (.env) -> interactive prompt.
+    from dropbox_sync import load_env
+    load_env()
+    batch_pw = password or os.getenv("PFA_PDF_PASSWORD")
     try:
         _cats, merchants_simple, accounts = load_lookups(conn)
         mapping = load_map(conn)
@@ -258,8 +325,12 @@ def ingest(paths: list[Path], db_path: Path, account: str | None,
                       f"(use --force to re-ingest). Skipping.")
                 continue
 
-            text, method = extract_text(path)
-            print(f"\n{path.name} [{method}] — {len(text):,} chars extracted")
+            print(f"\n{path.name}")
+            text, method, batch_pw = _unlock(path, batch_pw)
+            if text is None:
+                print("  ! could not unlock (wrong/no password), skipping.")
+                continue
+            print(f"  [{method}] — {len(text):,} chars extracted")
 
             if use_ai:
                 if redact:
@@ -351,6 +422,8 @@ def main() -> None:
                         help="Re-ingest even if the file was already processed")
     parser.add_argument("--no-redact", dest="redact", action="store_false",
                         help="Do NOT redact PII before an --ai send (not recommended)")
+    parser.add_argument("--password", help="PDF password (better: set PFA_PDF_PASSWORD "
+                        "in .env, or leave blank to be prompted securely)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Parse and preview without writing")
     args = parser.parse_args()
@@ -362,7 +435,7 @@ def main() -> None:
         raise SystemExit(f"No PDF files found in {args.target}")
     print(f"Found {len(pdfs)} PDF(s). Parser: {'AI' if args.ai else 'local'}")
     ingest(pdfs, args.db, args.account, args.source_type, args.ai,
-           args.model, args.dry_run, args.force, args.redact)
+           args.model, args.dry_run, args.force, args.redact, args.password)
 
 
 if __name__ == "__main__":

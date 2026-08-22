@@ -39,6 +39,8 @@ python scripts/ingest.py data/inbox/ --account "BCA Checking"
 # PDF statements (local parser is default; --ai sends extracted TEXT to Claude):
 python scripts/ingest.py data/statements/ --type cc --account "BCA Card"
 python scripts/ingest.py data/statements/hard.pdf --type ewallet --ai
+# Password-protected statements: you'll be prompted securely, or:
+python scripts/ingest.py data/statements/bca.pdf --type cc --password '...'  # or PFA_PDF_PASSWORD in .env
 
 # 2b. Reconcile fuzzy cross-source duplicates (e.g. receipt + card statement)
 python scripts/reconcile.py --cross-only

@@ -73,6 +73,8 @@ def main() -> None:
     parser.add_argument("--force", action="store_true", help="Re-ingest processed PDFs")
     parser.add_argument("--no-redact", dest="redact", action="store_false",
                         help="Do NOT redact PII before an --ai send (not recommended)")
+    parser.add_argument("--password", help="Password for locked PDFs "
+                        "(or set PFA_PDF_PASSWORD in .env, or be prompted)")
     args = parser.parse_args()
 
     if not args.target.exists():
@@ -94,7 +96,8 @@ def main() -> None:
         print(f"\n=== statements: {len(groups['pdf'])} PDF(s) ===")
         total += ingest_pdf.ingest(groups["pdf"], args.db, args.account,
                                    args.source_type, args.ai, args.model,
-                                   args.dry_run, args.force, args.redact) or 0
+                                   args.dry_run, args.force, args.redact,
+                                   args.password) or 0
 
     if not any(groups.values()):
         raise SystemExit("No supported files found to ingest.")
