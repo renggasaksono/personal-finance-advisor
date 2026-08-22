@@ -252,15 +252,13 @@ def ingest(path: Path, db_path: Path, default_account: str | None,
             print("\n[dry-run] No rows written.")
             return 0
 
-        conn.executemany(
-            "INSERT INTO transactions "
-            "(date, amount, type, category_id, merchant, account_id, "
-            " family_member, source, notes) VALUES (?,?,?,?,?,?,?,?,?)",
-            rows_to_insert,
-        )
-        conn.commit()
-        print(f"\nInserted {len(rows_to_insert)} transaction(s) into {db_path}.")
-        return len(rows_to_insert)
+        from ingest_core import commit_transactions
+        inserted, dups = commit_transactions(conn, rows_to_insert)
+        msg = f"\nInserted {inserted} transaction(s) into {db_path}."
+        if dups:
+            msg += f" Skipped {dups} duplicate(s)."
+        print(msg)
+        return inserted
     finally:
         conn.close()
 

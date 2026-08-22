@@ -184,16 +184,13 @@ def ingest(paths: list[Path], db_path: Path, engine_name: str,
             print("[dry-run] No rows written.")
             return 0
 
-        if rows:
-            conn.executemany(
-                "INSERT INTO transactions "
-                "(date, amount, type, category_id, merchant, account_id, "
-                " family_member, source, notes) VALUES (?,?,?,?,?,?,?,?,?)",
-                rows,
-            )
-            conn.commit()
-        print(f"Inserted {len(rows)} transaction(s) into {db_path}.")
-        return len(rows)
+        from ingest_core import commit_transactions
+        inserted, dups = commit_transactions(conn, rows)
+        msg = f"Inserted {inserted} transaction(s) into {db_path}."
+        if dups:
+            msg += f" Skipped {dups} duplicate(s)."
+        print(msg)
+        return inserted
     finally:
         conn.close()
 

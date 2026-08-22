@@ -71,11 +71,15 @@ CREATE TABLE IF NOT EXISTS transactions (
     account_id    INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
     family_member TEXT,
     source        TEXT    NOT NULL DEFAULT 'manual'
-                          CHECK (source IN ('manual', 'sheet', 'receipt')),
-    notes         TEXT
+                          CHECK (source IN ('manual', 'sheet', 'receipt', 'statement')),
+    notes         TEXT,
+    external_ref  TEXT,                               -- bank/statement txn id, if any
+    dedup_hash    TEXT                                -- content hash for dedup
 );
 CREATE INDEX IF NOT EXISTS idx_transactions_date     ON transactions(date);
 CREATE INDEX IF NOT EXISTS idx_transactions_category ON transactions(category_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_dedup
+    ON transactions(dedup_hash) WHERE dedup_hash IS NOT NULL;
 
 -- Monthly limit per category, used for "sidetracked" alerts.
 CREATE TABLE IF NOT EXISTS budgets (
@@ -174,6 +178,20 @@ CREATE TABLE IF NOT EXISTS debts (
     notes           TEXT
 );
 
+-- Ingested statement files, tracked by content hash so re-importing the same
+-- file is a no-op. One row per PDF/CSV statement processed.
+CREATE TABLE IF NOT EXISTS statements (
+    id           INTEGER PRIMARY KEY,
+    file_hash    TEXT    NOT NULL UNIQUE,   -- sha256 of the file bytes
+    file_name    TEXT,
+    source_type  TEXT,                       -- cc / ewallet / bank / other
+    account_id   INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+    period_start TEXT,
+    period_end   TEXT,
+    row_count    INTEGER,
+    ingested_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
 -- ===== Reporting ========================================================
 
 -- Monthly rollup. THIS is the only table whose contents get sent to Claude.
@@ -197,6 +215,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
 # Tables in dependency-safe drop order (children before parents).
 _DROP_ORDER = [
     "snapshots",
+    "statements",
     "debts",
     "assets",
     "investment_valuations",
