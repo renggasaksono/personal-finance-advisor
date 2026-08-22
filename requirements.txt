@@ -1,0 +1,15 @@
+# Personal Finance Advisor — Python dependencies
+# SQLite (init_db, categorize, snapshots) uses only the stdlib — no deps.
+
+# Sheet ingestion (scripts/ingest_sheet.py)
+pandas>=2.0
+openpyxl>=3.1            # XLSX support for pandas
+
+# Receipt OCR ingestion (scripts/ingest_receipt.py) — local, offline default
+pillow>=10.0
+pytesseract>=0.3.10      # also requires the Tesseract binary on PATH:
+                         #   macOS:  brew install tesseract tesseract-lang
+                         #   Ubuntu: sudo apt-get install tesseract-ocr tesseract-ocr-ind
+
+# Optional heavier OCR engine (scripts/ocr_engines.py: --engine easyocr)
+# easyocr>=1.7
