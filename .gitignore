@@ -1,0 +1,12 @@
+# Local database and real personal data - never commit
+*.db
+*.sqlite
+*.sqlite3
+data/*.csv
+data/*.xlsx
+data/receipts/
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
