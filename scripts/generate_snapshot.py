@@ -100,13 +100,25 @@ def net_worth(conn: sqlite3.Connection, month: str) -> int:
     + current asset estimates
     - outstanding debt balances
     """
+    # Accounts that are actually liabilities (e.g. a credit card) are excluded
+    # here and represented by their debts row instead — otherwise the card's
+    # charges would be counted once as a negative account balance AND again as
+    # the debt. Match by name (account name == debt name).
+    debt_names = {r[0].strip().lower() for r in conn.execute("SELECT name FROM debts")}
+    excluded = {aid for aid, name in conn.execute("SELECT id, name FROM accounts")
+                if name.strip().lower() in debt_names}
+
     # Account balances: starting + income - expense (transfers net to zero).
-    start = conn.execute("SELECT COALESCE(SUM(starting_balance),0) FROM accounts").fetchone()[0]
+    start = sum(sb for aid, sb in
+                conn.execute("SELECT id, starting_balance FROM accounts")
+                if aid not in excluded)
     delta = 0
-    for typ, amount in conn.execute(
-        "SELECT type, amount FROM transactions "
+    for aid, typ, amount in conn.execute(
+        "SELECT account_id, type, amount FROM transactions "
         "WHERE account_id IS NOT NULL AND substr(date,1,7) <= ?", (month,)
     ):
+        if aid in excluded:
+            continue
         if typ == "expense":
             delta -= amount
         elif typ == "income":
