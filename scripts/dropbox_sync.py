@@ -38,9 +38,14 @@ from init_db import DEFAULT_DB                       # noqa: E402
 from ingest_receipt import IMAGE_EXTS               # noqa: E402
 from ingest_receipt import ingest as ingest_receipts  # noqa: E402
 from ingest_sheet import ingest as ingest_sheet      # noqa: E402
+from ingest_pdf import ingest as ingest_pdf_fn        # noqa: E402
+from ingest_pdf import AI_MODEL_DEFAULT, SOURCE_TYPES  # noqa: E402
+from ingest import classify                           # noqa: E402
 from ocr_engines import DEFAULT_ENGINE               # noqa: E402
 
 SHEET_EXTS = {".csv", ".xlsx", ".xls"}
+PDF_EXTS = {".pdf"}
+ALL_EXTS = SHEET_EXTS | IMAGE_EXTS | PDF_EXTS
 ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 
 
@@ -153,9 +158,9 @@ def cmd_list(dbx, folder: str) -> None:
         print(f"No files in {folder!r}.")
         return
     print(f"{len(files)} file(s) in {folder!r}:")
+    kinds = {"sheet": "sheet", "receipt": "img", "pdf": "pdf"}
     for e in files:
-        kind = "img" if Path(e.name).suffix.lower() in IMAGE_EXTS else (
-            "sheet" if Path(e.name).suffix.lower() in SHEET_EXTS else "other")
+        kind = kinds.get(classify(Path(e.name)), "other")
         print(f"  [{kind:5}] {e.name}  ({e.size:,} bytes)")
 
 
@@ -197,6 +202,43 @@ def cmd_pull_sheets(dbx, folder: str, db: Path, account: str | None,
         _archive(dbx, entries, processed, archive)
 
 
+def cmd_pull(dbx, folder: str, db: Path, account: str | None,
+             source_type: str | None, use_ai: bool, model: str, engine: str,
+             archive: str | None, dry_run: bool) -> None:
+    """Download every supported file (sheets, images, PDFs) and route each."""
+    entries = list_files(dbx, folder, ALL_EXTS)
+    if not entries:
+        print(f"No supported files in {folder!r}.")
+        return
+    print(f"Found {len(entries)} file(s) in Dropbox {folder!r}.")
+    processed: set[str] = set()
+    with tempfile.TemporaryDirectory(prefix="pfa_pull_") as tmp:
+        paths = _download_all(dbx, entries, Path(tmp))
+        groups: dict[str, list[Path]] = {"sheet": [], "receipt": [], "pdf": []}
+        for p in paths:
+            kind = classify(p)
+            if kind:
+                groups[kind].append(p)
+        for s in groups["sheet"]:
+            print(f"\n--- sheet: {s.name} ---")
+            try:
+                ingest_sheet(s, db, account, None, dry_run)
+                processed.add(s.name)
+            except SystemExit as err:
+                print(f"  ! skipped {s.name}: {err}")
+        if groups["receipt"]:
+            print(f"\n--- receipts: {len(groups['receipt'])} image(s) ---")
+            ingest_receipts(groups["receipt"], db, engine, account, dry_run)
+            processed.update(p.name for p in groups["receipt"])
+        if groups["pdf"]:
+            print(f"\n--- statements: {len(groups['pdf'])} PDF(s) ---")
+            ingest_pdf_fn(groups["pdf"], db, account, source_type, use_ai,
+                          model, dry_run, False)
+            processed.update(p.name for p in groups["pdf"])
+    if archive and not dry_run and processed:
+        _archive(dbx, entries, processed, archive)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sync a Dropbox folder into the pipeline.")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB,
@@ -220,6 +262,15 @@ def main() -> None:
     add_common(p_s)
     p_s.add_argument("--account", help="Default account name for rows with no account column")
 
+    p_p = sub.add_parser("pull", help="Ingest ALL supported files (sheets/images/PDFs)")
+    add_common(p_p)
+    p_p.add_argument("--account", help="Account name to assign")
+    p_p.add_argument("--engine", default=DEFAULT_ENGINE, help="OCR engine for images")
+    p_p.add_argument("--type", dest="source_type", choices=SOURCE_TYPES,
+                     help="Statement type for PDFs (cc/ewallet/bank/other)")
+    p_p.add_argument("--ai", action="store_true", help="AI-structure PDF statements")
+    p_p.add_argument("--model", default=AI_MODEL_DEFAULT)
+
     args = parser.parse_args()
     load_env()
     dbx = get_client()
@@ -232,6 +283,9 @@ def main() -> None:
     elif args.command == "pull-sheets":
         cmd_pull_sheets(dbx, args.folder, args.db, args.account,
                         args.archive, args.dry_run)
+    elif args.command == "pull":
+        cmd_pull(dbx, args.folder, args.db, args.account, args.source_type,
+                 args.ai, args.model, args.engine, args.archive, args.dry_run)
 
 
 if __name__ == "__main__":
