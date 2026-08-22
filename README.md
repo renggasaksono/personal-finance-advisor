@@ -81,6 +81,7 @@ python scripts/dropbox_sync.py pull --folder /Finance/Inbox --account "BCA Check
 | `ingest_sheet.py` | CSV/XLSX → `transactions` (pandas, IDR/date parsing) |
 | `ingest_receipt.py` | Receipt photos → `transactions` via pluggable OCR (`ocr_engines.py`) |
 | `ingest_pdf.py` | PDF statements → `transactions` (text/OCR, local parser + opt-in `--ai`) |
+| `pii.py` | Redact card/account/NPWP/phone/email/address from statement text |
 | `categorize.py` | Merchant→category learning loop + backfill |
 | `reconcile.py` | Report/remove fuzzy cross-source duplicate transactions |
 | `generate_snapshot.py` | Monthly rollup → `snapshots` (income/expense/net worth/goals) |
@@ -102,3 +103,18 @@ leave the machine. Two features can reach the network, both explicit and opt-in:
 `ingest_pdf.py --ai` (sends only the **extracted statement text**, never the PDF,
 to Claude to structure hard layouts). The default PDF parser is fully local. The
 DB and all `data/` outputs are git-ignored.
+
+### PII redaction (`pii.py`)
+Before any `--ai` send, statement text is **redacted** — card numbers (incl.
+Luhn-checked and 4-4-4-4 groups), bank account numbers, NPWP, phone, and email
+are masked to `[CARD]`/`[ACCT]`/`[NPWP]`/`[PHONE]`/`[EMAIL]`; IDR amounts are
+preserved. Card/account numbers are also stripped from transaction descriptions
+before they're stored locally. Preview what would be removed:
+```bash
+python scripts/pii.py data/statements/bca.pdf --addresses
+python scripts/ingest_pdf.py data/x.pdf --ai          # redaction on by default
+python scripts/ingest_pdf.py data/x.pdf --ai --no-redact   # opt out (not advised)
+```
+Note: structured identifiers are removed deterministically; **cardholder names
+and free-form addresses are only best-effort** (names need NER) — review the
+`pii.py` preview if a statement puts a name in an unusual place.

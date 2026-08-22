@@ -35,6 +35,7 @@ from init_db import DEFAULT_DB, connect            # noqa: E402
 from ingest_core import commit_transactions          # noqa: E402
 from ingest_sheet import parse_amount, parse_date, load_lookups  # noqa: E402
 from categorize import load_map, match_category       # noqa: E402
+from pii import redact as redact_text, redact_field    # noqa: E402
 
 AI_MODEL_DEFAULT = os.getenv("PFA_AI_MODEL", "claude-opus-5")
 SOURCE_TYPES = ("cc", "ewallet", "bank", "other")
@@ -233,7 +234,7 @@ def parse_statement_ai(text: str, model: str) -> list[dict]:
 
 def ingest(paths: list[Path], db_path: Path, account: str | None,
            source_type: str | None, use_ai: bool, model: str,
-           dry_run: bool, force: bool) -> int:
+           dry_run: bool, force: bool, redact: bool = True) -> int:
     conn = connect(db_path)
     total_inserted = 0
     try:
@@ -260,8 +261,16 @@ def ingest(paths: list[Path], db_path: Path, account: str | None,
             text, method = extract_text(path)
             print(f"\n{path.name} [{method}] — {len(text):,} chars extracted")
 
-            parsed = (parse_statement_ai(text, model) if use_ai
-                      else parse_statement_local(text))
+            if use_ai:
+                if redact:
+                    text, pii_counts = redact_text(text)
+                    print(f"  [PII] redacted before AI send: "
+                          f"{dict(pii_counts) or 'nothing matched'}")
+                else:
+                    print("  [PII] WARNING: --no-redact — raw text will be sent to Claude")
+                parsed = parse_statement_ai(text, model)
+            else:
+                parsed = parse_statement_local(text)
             if not parsed:
                 print("  ! no transactions parsed. "
                       "Try --ai, or check the extracted text.")
@@ -276,7 +285,9 @@ def ingest(paths: list[Path], db_path: Path, account: str | None,
 
             rows, uncategorized = [], 0
             for p in parsed:
-                merch = p["description"]
+                # Strip any card/account numbers from the description before it
+                # is categorized or stored locally.
+                merch = redact_field(p["description"])
                 cat_id = (merchants_simple.get(merch.lower()) if merch else None) \
                     or match_category(merch or "", mapping)
                 if cat_id is None:
@@ -338,6 +349,8 @@ def main() -> None:
                         help=f"AI model for --ai (default: {AI_MODEL_DEFAULT})")
     parser.add_argument("--force", action="store_true",
                         help="Re-ingest even if the file was already processed")
+    parser.add_argument("--no-redact", dest="redact", action="store_false",
+                        help="Do NOT redact PII before an --ai send (not recommended)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Parse and preview without writing")
     args = parser.parse_args()
@@ -349,7 +362,7 @@ def main() -> None:
         raise SystemExit(f"No PDF files found in {args.target}")
     print(f"Found {len(pdfs)} PDF(s). Parser: {'AI' if args.ai else 'local'}")
     ingest(pdfs, args.db, args.account, args.source_type, args.ai,
-           args.model, args.dry_run, args.force)
+           args.model, args.dry_run, args.force, args.redact)
 
 
 if __name__ == "__main__":

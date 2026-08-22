@@ -126,4 +126,5 @@ Full schema with sample data lives in `docs/finance_db_schema.md`.
 - Only `snapshots` (+ `goals` metadata) are shared externally, and only when analysis is requested
 - No images or PDFs retained after parsing (temp files are deleted; Dropbox originals stay in the user's account)
 - One deliberate, opt-in exception to "raw stays local": `ingest_pdf.py --ai` sends the **extracted statement text** (never the file) to Claude to structure hard layouts. The default PDF parser is fully local.
+- PII redaction (`scripts/pii.py`) runs before any `--ai` send — card/account numbers, NPWP, phone, and email are masked (IDR amounts preserved); card/account numbers are also stripped from stored descriptions. Names/addresses are best-effort only.
 - `.gitignore` excludes the actual SQLite DB file and any real personal data (incl. `data/*.md` exports) — only schema/scripts are versioned
