@@ -5,6 +5,9 @@
 data/*.csv
 data/*.xlsx
 data/receipts/
+data/*.md
+data/*.txt
+data/analysis_prompt.md
 .env
 __pycache__/
 *.pyc
