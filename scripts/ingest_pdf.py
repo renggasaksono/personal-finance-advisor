@@ -45,8 +45,65 @@ _DATE_RE = re.compile(
     r"\b(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})\b")
 # A currency-ish number: 1.250.000  /  75,000  /  12.500,00  /  Rp 5000
 _MONEY_RE = re.compile(r"(?:rp\.?\s*)?(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2})?|\d{4,}(?:[.,]\d{2})?)", re.I)
-# Credit markers -> treat as income rather than expense.
-_CREDIT_RE = re.compile(r"\b(cr|kredit|credit|masuk|refund|cashback|top ?up)\b", re.I)
+# Credit markers -> treat as income rather than expense. Deliberately strict:
+# a standalone 'CR' flag (not the substring in 'CREDIT'), or explicit terms.
+_CREDIT_RE = re.compile(
+    r"(?:\bCR\b|\brefund\b|\bcashback\b|\breversal\b|\bpembayaran\b|\btop[\s-]?up\b)",
+    re.I)
+
+# Indonesian (and a few English) month names -> number, keyed by first 3 letters.
+_ID_MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "mei": 5, "may": 5, "jun": 6,
+    "jul": 7, "agu": 8, "agt": 8, "ags": 8, "aug": 8, "sep": 9, "okt": 10,
+    "oct": 10, "nov": 11, "des": 12, "dec": 12,
+}
+# Day + month-name date, e.g. 06-OKT / 03 NOV / 3 November
+_ID_DATE_RE = re.compile(r"\b(\d{1,2})[-\s]([A-Za-z]{3,9})\b")
+# A full anchor date somewhere in the header, e.g. 03 NOVEMBER 2025
+_FULL_ID_DATE = re.compile(r"\b(\d{1,2})\s+([A-Za-z]{3,9})\s+(20\d{2})\b")
+
+
+def _statement_anchor(text: str) -> tuple[int, int] | None:
+    """(year, month) from the statement header, to supply the year for
+    day-month-only transaction dates."""
+    for m in _FULL_ID_DATE.finditer(text):
+        mon = _ID_MONTHS.get(m.group(2)[:3].lower())
+        if mon:
+            return int(m.group(3)), mon
+    return None
+
+
+def _strip_id_dates(s: str) -> str:
+    """Remove only real day-month tokens (leave things like 'KE 05 DARI')."""
+    def repl(m):
+        return " " if _ID_MONTHS.get(m.group(2)[:3].lower()) else m.group(0)
+    return _ID_DATE_RE.sub(repl, s)
+
+
+def _find_date(line: str, anchor: tuple[int, int] | None):
+    """Return (iso_date, matched_text) using a numeric date, else a
+    day-month-name date with the year inferred from `anchor`."""
+    m = _DATE_RE.search(line)
+    if m:
+        d = parse_date(m.group(1))
+        if d:
+            return d, m.group(0)
+    for m in _ID_DATE_RE.finditer(line):
+        mon = _ID_MONTHS.get(m.group(2)[:3].lower())
+        day = int(m.group(1))
+        if not mon or not (1 <= day <= 31):
+            continue
+        # A full 'DD MONTH YYYY' (year follows) is a header/promo date, not a
+        # transaction row (rows are year-less like '06-OKT'). Skip it.
+        if re.match(r"\s*20\d{2}\b", line[m.end():m.end() + 6]):
+            continue
+        if not anchor:
+            return None, None      # can't know the year
+        year, smonth = anchor
+        if mon > smonth:           # e.g. Dec txn on a Jan statement
+            year -= 1
+        return f"{year:04d}-{mon:02d}-{day:02d}", m.group(0)
+    return None, None
 
 
 # --------------------------------------------------------------------------
@@ -149,18 +206,17 @@ def parse_statement_local(text: str) -> list[dict]:
     trailing column). Lines with multiple amounts (e.g. a running-balance
     column) are ambiguous and flagged. Use --ai for layouts this misreads.
     """
+    anchor = _statement_anchor(text)
     rows = []
     for line in (l.strip() for l in text.splitlines()):
         if not line:
             continue
-        dm = _DATE_RE.search(line)
-        if not dm:
-            continue
-        date = parse_date(dm.group(1))
+        date, datetok = _find_date(line, anchor)
         if not date:
             continue
-        # Strip the date first so its year (e.g. 2026) isn't read as an amount.
-        rest = line.replace(dm.group(1), " ")
+        # Strip the transaction date and any posting/second day-month date so
+        # they aren't read as amounts, then take the trailing money token.
+        rest = _strip_id_dates(line.replace(datetok, " "))
         monies = _money_tokens(rest)
         if not monies:
             continue
