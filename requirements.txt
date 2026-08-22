@@ -14,6 +14,13 @@ pytesseract>=0.3.10      # also requires the Tesseract binary on PATH:
 # Optional heavier OCR engine (scripts/ocr_engines.py: --engine easyocr)
 # easyocr>=1.7
 
+# PDF statement ingestion (scripts/ingest_pdf.py)
+pdfplumber>=0.11         # text + table extraction from PDFs
+pypdfium2>=4.0           # render pages for OCR fallback on scanned PDFs
+pypdf>=4.0               # encrypted-PDF detection + password handling
+
+# Optional: AI structuring of hard statement layouts (ingest_pdf.py --ai)
+anthropic>=0.40
+
 # Dropbox folder sync (scripts/dropbox_sync.py)
 dropbox>=11.36
-pypdf>=4.0
