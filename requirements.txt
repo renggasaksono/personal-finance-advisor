@@ -13,3 +13,6 @@ pytesseract>=0.3.10      # also requires the Tesseract binary on PATH:
 
 # Optional heavier OCR engine (scripts/ocr_engines.py: --engine easyocr)
 # easyocr>=1.7
+
+# Dropbox folder sync (scripts/dropbox_sync.py)
+dropbox>=11.36

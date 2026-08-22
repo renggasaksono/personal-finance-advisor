@@ -44,6 +44,19 @@ python scripts/generate_snapshot.py 2026-08 --show   # inspect before sharing
 python scripts/export_analysis.py            # -> data/analysis_prompt.md
 ```
 
+### Optional: pull from Dropbox
+Instead of local files, ingest straight from a Dropbox folder. Files are
+downloaded to a temp dir, ingested, then deleted — receipt images are never
+retained locally. Copy `.env.example` to `.env` and add your Dropbox app
+credentials first.
+```bash
+python scripts/dropbox_sync.py list          --folder /Finance/Receipts
+python scripts/dropbox_sync.py pull-receipts --folder /Finance/Receipts --dry-run
+python scripts/dropbox_sync.py pull-receipts --folder /Finance/Receipts --account Cash \
+    --archive /Finance/Processed             # move processed originals aside
+python scripts/dropbox_sync.py pull-sheets   --folder /Finance/Sheets --account "BCA Checking"
+```
+
 ## Scripts
 | Script | Purpose |
 |--------|---------|
@@ -53,6 +66,7 @@ python scripts/export_analysis.py            # -> data/analysis_prompt.md
 | `categorize.py` | Merchant→category learning loop + backfill |
 | `generate_snapshot.py` | Monthly rollup → `snapshots` (income/expense/net worth/goals) |
 | `export_analysis.py` | Snapshots → paste-ready, Indonesia-localized Claude prompt |
+| `dropbox_sync.py` | Pull receipts/sheets from a Dropbox folder into the pipeline |
 
 ## Privacy
 Raw `transactions`, `family_profile`, `investments`, `assets`, and `debts` never
