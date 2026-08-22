@@ -4,31 +4,45 @@ A privacy-first, Indonesia-localized personal finance tracker and AI-assisted ad
 
 - Raw financial data stays local (SQLite)
 - Only aggregated monthly snapshots are shared with Claude for analysis
-- Ingests expense sheets and receipt photos (no direct bank account linking)
+- Ingests expense sheets, receipt photos, and PDF statements (credit card,
+  e-wallet, bank) — no direct bank account linking
+- Duplicate statements/rows are detected and skipped automatically
 
 See `docs/PLANNING.md` for architecture and `docs/finance_db_schema.md` for the full schema with sample data.
 
 ## Status
-Pipeline complete (build steps 1–6). All ingestion, categorization, snapshot,
-and export scripts are in `scripts/`.
+Core pipeline complete. Ingestion (sheets, receipts, PDF statements),
+deduplication, categorization, snapshots, reconciliation, Dropbox sync, and
+Claude export are all in `scripts/`.
 
 ## Setup
 ```bash
-pip install -r requirements.txt             # pandas/openpyxl/pillow/pytesseract
+pip install -r requirements.txt             # pandas/openpyxl/pillow/pytesseract/pdfplumber/...
 python scripts/init_db.py --reset --seed    # fresh DB (data/finance.db) with sample data
+# upgrading an existing DB created before dedup/statements:
+python scripts/migrate.py
 ```
-Receipt OCR also needs the Tesseract binary (`brew install tesseract tesseract-lang`
-on macOS). SQLite scripts (init/categorize/snapshot/export) use only the stdlib.
+Receipt/scanned-PDF OCR also needs the Tesseract binary
+(`brew install tesseract tesseract-lang` on macOS). The `--ai` PDF parser and
+`export_analysis.py` are the only features that can talk to the network, and
+only when you explicitly invoke them.
 
 ## Workflow
 ```bash
 # 1. Create / reset the local DB (source of truth, git-ignored)
 python scripts/init_db.py --reset --seed
 
-# 2. Ingest expense data
-python scripts/ingest_sheet.py   data/august.csv --account "BCA Checking"
-python scripts/ingest_receipt.py data/receipts/ --dry-run   # preview OCR first
-python scripts/ingest_receipt.py data/receipts/
+# 2. Ingest expense data — one command auto-routes by file type
+python scripts/ingest.py data/inbox/ --account "BCA Checking" --dry-run  # preview
+python scripts/ingest.py data/inbox/ --account "BCA Checking"
+#   CSV/XLSX -> sheet parser | images -> receipt OCR | PDF -> statement parser
+# PDF statements (local parser is default; --ai sends extracted TEXT to Claude):
+python scripts/ingest.py data/statements/ --type cc --account "BCA Card"
+python scripts/ingest.py data/statements/hard.pdf --type ewallet --ai
+
+# 2b. Reconcile fuzzy cross-source duplicates (e.g. receipt + card statement)
+python scripts/reconcile.py --cross-only
+python scripts/reconcile.py --drop 42        # remove one reviewed row by id
 
 # 3. Categorize unknown merchants (learning loop feeds future ingests)
 python scripts/categorize.py list
@@ -50,26 +64,41 @@ downloaded to a temp dir, ingested, then deleted — receipt images are never
 retained locally. Copy `.env.example` to `.env` and add your Dropbox app
 credentials first.
 ```bash
-python scripts/dropbox_sync.py list          --folder /Finance/Receipts
-python scripts/dropbox_sync.py pull-receipts --folder /Finance/Receipts --dry-run
-python scripts/dropbox_sync.py pull-receipts --folder /Finance/Receipts --account Cash \
-    --archive /Finance/Processed             # move processed originals aside
-python scripts/dropbox_sync.py pull-sheets   --folder /Finance/Sheets --account "BCA Checking"
+python scripts/dropbox_sync.py list --folder /Finance/Inbox
+python scripts/dropbox_sync.py pull --folder /Finance/Inbox --dry-run
+python scripts/dropbox_sync.py pull --folder /Finance/Inbox --account "BCA Checking" \
+    --type cc --archive /Finance/Done        # sheets + images + PDFs, then archive
+# granular commands (pull-receipts / pull-sheets) still exist if you want them.
 ```
 
 ## Scripts
 | Script | Purpose |
 |--------|---------|
-| `init_db.py` | Create the SQLite schema (14 tables); `--seed` loads sample data |
-| `ingest_sheet.py` | CSV/XLSX → `transactions` (pandas, IDR/date parsing, auto-categorize) |
+| `init_db.py` | Create the SQLite schema; `--seed` loads sample data |
+| `migrate.py` | Upgrade an existing DB to the current schema (dedup + statements) |
+| `ingest.py` | **Unified entry point** — auto-routes any file/folder by type |
+| `ingest_core.py` | Shared dedup + insert (one place all ingesters write through) |
+| `ingest_sheet.py` | CSV/XLSX → `transactions` (pandas, IDR/date parsing) |
 | `ingest_receipt.py` | Receipt photos → `transactions` via pluggable OCR (`ocr_engines.py`) |
+| `ingest_pdf.py` | PDF statements → `transactions` (text/OCR, local parser + opt-in `--ai`) |
 | `categorize.py` | Merchant→category learning loop + backfill |
+| `reconcile.py` | Report/remove fuzzy cross-source duplicate transactions |
 | `generate_snapshot.py` | Monthly rollup → `snapshots` (income/expense/net worth/goals) |
 | `export_analysis.py` | Snapshots → paste-ready, Indonesia-localized Claude prompt |
-| `dropbox_sync.py` | Pull receipts/sheets from a Dropbox folder into the pipeline |
+| `dropbox_sync.py` | Pull sheets/receipts/PDFs from a Dropbox folder into the pipeline |
+| `dropbox_auth.py` | One-time helper to obtain a long-lived Dropbox refresh token |
+
+## Deduplication
+Every ingested row gets a content hash (`dedup_hash`), so re-importing a sheet
+or an overlapping statement skips rows already present. PDF statements are also
+hashed as whole files, so re-processing the same file is a no-op. `reconcile.py`
+catches fuzzy near-duplicates (same amount, close dates, different source) that
+an exact hash can't — e.g. a snapped receipt that also lands on a card statement.
 
 ## Privacy
 Raw `transactions`, `family_profile`, `investments`, `assets`, and `debts` never
-leave the machine. Only `snapshots` (aggregates + goal targets) are exported, and
-only when you run `export_analysis.py` and paste the result yourself — no API keys,
-no automatic egress. The DB and all `data/` outputs are git-ignored.
+leave the machine. Two features can reach the network, both explicit and opt-in:
+`export_analysis.py` (you paste the aggregate snapshot yourself) and
+`ingest_pdf.py --ai` (sends only the **extracted statement text**, never the PDF,
+to Claude to structure hard layouts). The default PDF parser is fully local. The
+DB and all `data/` outputs are git-ignored.

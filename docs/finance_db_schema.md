@@ -50,6 +50,11 @@ Built up over time so the script auto-categorizes repeat merchants.
 ## 4. `transactions`
 Raw ledger — stays local, never leaves your machine.
 
+Additional columns (added for statement ingestion / dedup): `source` now also
+accepts `statement`; `external_ref` holds a bank/statement txn id when available;
+`dedup_hash` is a content hash with a partial UNIQUE index so re-imported or
+overlapping rows are skipped on insert.
+
 | id | date | amount | category_id | merchant | account_id | family_member | source | notes |
 |----|------|--------|--------------|----------|------------|----------------|--------|-------|
 | 1 | 2026-08-01 | 3,500,000 | 4 | Bank Mandiri | 1 | - | manual | Cicilan rumah |
@@ -119,7 +124,20 @@ Monthly rollup — computed, not manually entered. **This is what gets sent to C
 
 ---
 
+## 10. `statements`
+Provenance for ingested statement files, so re-importing the same PDF is a no-op.
+
+| id | file_hash | file_name | source_type | account_id | period_start | period_end | row_count | ingested_at |
+|----|-----------|-----------|-------------|------------|--------------|------------|-----------|-------------|
+| 1 | sha256… | bca_2026_08.pdf | cc | 1 | 2026-08-02 | 2026-08-28 | 24 | 2026-08-22 11:19 |
+
+`file_hash` is UNIQUE. `source_type` ∈ cc / ewallet / bank / other.
+
+---
+
 ## What actually gets sent to Claude for analysis
 Only the `snapshots` table (+ `goals` metadata for target/date context) — no merchant names, no per-transaction detail, no family member identities needed unless you want per-member breakdowns in the advice.
 
-Want me to write the Python script that builds this SQLite DB and populates it from a CSV + a folder of receipt photos?
+The scripts that build and populate this DB live in `scripts/` — see the README:
+`init_db.py` (schema), `ingest.py` (unified sheet/receipt/PDF ingestion),
+`categorize.py`, `generate_snapshot.py`, and `export_analysis.py`.
