@@ -44,6 +44,18 @@ only when you explicitly invoke them.
 # 1. Create / reset the local DB (source of truth, git-ignored)
 python scripts/init_db.py --reset --seed
 
+# 1b. Set up your real accounts, debts, goals, budgets (no SQL needed).
+#     Amounts take 15000000, 'Rp 15.000.000', 15jt, 1,5jt or 750rb.
+#     A starting balance is the balance the day before your first import.
+python scripts/setup.py account add "BCA Checking" --type bank --balance 12,5jt
+python scripts/setup.py account add "BCA Credit Card" --type credit
+python scripts/setup.py debt add "BCA Credit Card" --balance 9687566 --payment 1134889
+python scripts/setup.py goal add "Emergency Fund" --target 75jt --date 2027-06-01 --priority High
+python scripts/setup.py goal contribute "Emergency Fund" 2jt --date 2026-11-01
+python scripts/setup.py budget set Groceries 3,5jt --month 2026-11 --through 2027-03
+python scripts/setup.py profile set monthly_income_total 25jt
+python scripts/setup.py account list          # also: debt/goal/budget/category list, profile show
+
 # 2. Ingest expense data — one command auto-routes by file type
 python scripts/ingest.py data/inbox/ --account "BCA Checking" --dry-run  # preview
 python scripts/ingest.py data/inbox/ --account "BCA Checking"
@@ -91,6 +103,7 @@ python scripts/dropbox_sync.py pull --folder /Finance/Inbox --account "BCA Check
 |--------|---------|
 | `init_db.py` | Create the SQLite schema; `--seed` loads sample data |
 | `migrate.py` | Upgrade an existing DB to the current schema; `--credit NAME` marks a card account |
+| `setup.py` | Add/change/list accounts, debts, goals + contributions, budgets, categories, profile |
 | `ingest.py` | **Unified entry point** — auto-routes any file/folder by type |
 | `ingest_core.py` | Shared dedup + insert (one place all ingesters write through) |
 | `ingest_sheet.py` | CSV/XLSX → `transactions` (pandas, IDR/date parsing) |
