@@ -28,7 +28,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from init_db import DEFAULT_DB, connect  # noqa: E402
 
 
-def monthly_income(conn: sqlite3.Connection) -> int:
+def liability_account_ids(conn: sqlite3.Connection) -> set[int]:
+    """Accounts that hold money owed rather than money held: type 'credit',
+    or any account whose name matches a debts row (older setups)."""
+    debt_names = {r[0].strip().lower() for r in conn.execute("SELECT name FROM debts")}
+    return {aid for aid, name, typ in
+            conn.execute("SELECT id, name, type FROM accounts")
+            if typ == "credit" or name.strip().lower() in debt_names}
+
+
+def baseline_income(conn: sqlite3.Connection) -> int:
     """Income baseline from family_profile.monthly_income_total (IDR)."""
     row = conn.execute(
         "SELECT value FROM family_profile WHERE key='monthly_income_total'"
@@ -39,6 +48,29 @@ def monthly_income(conn: sqlite3.Connection) -> int:
         return int(float(row[0]))
     except (ValueError, TypeError):
         return 0
+
+
+def monthly_income(conn: sqlite3.Connection, month: str) -> tuple[int, str]:
+    """(income, basis) for the month.
+
+    Uses income transactions actually recorded that month ('actual'). Income
+    rows on liability accounts are skipped: on a credit card they are refunds or
+    cashback, not household income. Transfers (salary moved between your own
+    accounts, card bill payments, e-wallet top-ups) are never income. When no
+    income was recorded at all — e.g. only card statements have been imported
+    so far — falls back to the family_profile figure ('baseline').
+    """
+    liabilities = liability_account_ids(conn)
+    actual = 0
+    for aid, amount in conn.execute(
+        "SELECT account_id, amount FROM transactions "
+        "WHERE type='income' AND substr(date,1,7)=?", (month,)
+    ):
+        if aid not in liabilities:
+            actual += amount
+    if actual:
+        return int(actual), "actual"
+    return baseline_income(conn), "baseline"
 
 
 def category_totals(conn: sqlite3.Connection, month: str) -> dict[str, int]:
@@ -100,10 +132,10 @@ def net_worth(conn: sqlite3.Connection, month: str) -> int:
     + current asset estimates
     - outstanding debt balances
     """
-    # Accounts that are actually liabilities (e.g. a credit card) are excluded
-    # here and represented by their debts row instead — otherwise the card's
-    # charges would be counted once as a negative account balance AND again as
-    # the debt. Match by name (account name == debt name).
+    # A card that also has a debts row (matched by name) is represented by that
+    # row — otherwise its charges would count once as a negative account balance
+    # AND again as the debt. A 'credit' account with no debts row stays in: its
+    # ledger (charges minus refunds) is the amount owed.
     debt_names = {r[0].strip().lower() for r in conn.execute("SELECT name FROM debts")}
     excluded = {aid for aid, name in conn.execute("SELECT id, name FROM accounts")
                 if name.strip().lower() in debt_names}
@@ -152,13 +184,14 @@ def dti_ratio(conn: sqlite3.Connection, income: int) -> float | None:
 
 
 def build_snapshot(conn: sqlite3.Connection, month: str) -> dict:
-    income = monthly_income(conn)
+    income, basis = monthly_income(conn, month)
     cat_totals = category_totals(conn, month)
     expense = sum(cat_totals.values())
     savings = income - expense
     return {
         "month": month,
         "total_income": income,
+        "income_basis": basis,
         "total_expense": expense,
         "total_savings": savings,
         "savings_rate": round(savings / income, 4) if income else None,
@@ -173,11 +206,13 @@ def build_snapshot(conn: sqlite3.Connection, month: str) -> dict:
 def upsert_snapshot(conn: sqlite3.Connection, snap: dict) -> None:
     conn.execute(
         "INSERT INTO snapshots "
-        "(month, total_income, total_expense, total_savings, savings_rate, "
-        " net_worth, dti_ratio, category_totals, budget_status, goal_progress) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?) "
+        "(month, total_income, income_basis, total_expense, total_savings, "
+        " savings_rate, net_worth, dti_ratio, category_totals, budget_status, "
+        " goal_progress) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(month) DO UPDATE SET "
-        "  total_income=excluded.total_income, total_expense=excluded.total_expense, "
+        "  total_income=excluded.total_income, income_basis=excluded.income_basis, "
+        "  total_expense=excluded.total_expense, "
         "  total_savings=excluded.total_savings, savings_rate=excluded.savings_rate, "
         "  net_worth=excluded.net_worth, dti_ratio=excluded.dti_ratio, "
         "  category_totals=excluded.category_totals, "
@@ -185,7 +220,8 @@ def upsert_snapshot(conn: sqlite3.Connection, snap: dict) -> None:
         "  goal_progress=excluded.goal_progress, "
         "  created_at=datetime('now')",
         (
-            snap["month"], snap["total_income"], snap["total_expense"],
+            snap["month"], snap["total_income"], snap["income_basis"],
+            snap["total_expense"],
             snap["total_savings"], snap["savings_rate"], snap["net_worth"],
             snap["dti_ratio"], json.dumps(snap["category_totals"]),
             json.dumps(snap["budget_status"]), json.dumps(snap["goal_progress"]),
@@ -232,7 +268,7 @@ def main() -> None:
             rate = snap["savings_rate"]
             rate_str = f"{rate*100:.1f}%" if rate is not None else "n/a"
             print(f"{action} snapshot {month}: "
-                  f"income={snap['total_income']:,} "
+                  f"income={snap['total_income']:,} ({snap['income_basis']}) "
                   f"expense={snap['total_expense']:,} "
                   f"savings_rate={rate_str} "
                   f"net_worth={snap['net_worth']:,}")

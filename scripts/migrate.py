@@ -8,6 +8,11 @@ Adds the statement-ingestion + dedup features to a DB created before them:
     rebuild — SQLite can't alter a CHECK in place)
   - the statements table
   - backfills dedup_hash for existing rows
+And the liability / income-basis changes:
+  - 'credit' added to the accounts.type CHECK (table rebuild)
+  - snapshots.income_basis column
+  - `--credit NAME` marks an account as a liability (credit card / paylater);
+    accounts with ingested 'cc' statements are listed as candidates
 
 Safe to run repeatedly. Usage:
     python scripts/migrate.py
@@ -75,6 +80,50 @@ def rebuild_transactions(conn: sqlite3.Connection) -> None:
     """)
 
 
+def rebuild_accounts(conn: sqlite3.Connection) -> None:
+    """Rebuild accounts so its type CHECK accepts 'credit'. Child tables
+    reference accounts by name, so they keep pointing at the new table."""
+    print("  rebuilding accounts (adds 'credit' type)...")
+    conn.executescript("""
+        PRAGMA foreign_keys = OFF;
+        BEGIN;
+        CREATE TABLE accounts_new (
+            id               INTEGER PRIMARY KEY,
+            name             TEXT    NOT NULL UNIQUE,
+            type             TEXT    NOT NULL
+                                     CHECK (type IN ('bank', 'cash', 'ewallet', 'credit', 'other')),
+            starting_balance INTEGER NOT NULL DEFAULT 0,
+            currency         TEXT    NOT NULL DEFAULT 'IDR'
+        );
+        INSERT INTO accounts_new (id, name, type, starting_balance, currency)
+        SELECT id, name, type, starting_balance, currency FROM accounts;
+        DROP TABLE accounts;
+        ALTER TABLE accounts_new RENAME TO accounts;
+        COMMIT;
+        PRAGMA foreign_keys = ON;
+    """)
+
+
+def card_account_candidates(conn: sqlite3.Connection) -> list[str]:
+    """Non-credit accounts that have received credit-card statements. Only
+    reported, never converted: a checking account may have been used by mistake."""
+    return [r[0] for r in conn.execute(
+        "SELECT DISTINCT a.name FROM accounts a "
+        "JOIN statements s ON s.account_id = a.id "
+        "WHERE s.source_type = 'cc' AND a.type <> 'credit' ORDER BY a.name")]
+
+
+def mark_credit(conn: sqlite3.Connection, names: list[str]) -> None:
+    for name in names:
+        cur = conn.execute("UPDATE accounts SET type='credit' "
+                           "WHERE name=? COLLATE NOCASE", (name,))
+        if not cur.rowcount:
+            known = [r[0] for r in conn.execute("SELECT name FROM accounts ORDER BY name")]
+            raise SystemExit(f"Unknown account: {name!r}. Known: {known}")
+        print(f"  marked {name!r} as a credit (liability) account.")
+    conn.commit()
+
+
 def backfill_dedup(conn: sqlite3.Connection) -> int:
     """Compute dedup_hash for rows that don't have one (occurrence-indexed)."""
     rows = conn.execute(
@@ -105,6 +154,8 @@ def backfill_dedup(conn: sqlite3.Connection) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Migrate the finance DB schema.")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
+    parser.add_argument("--credit", action="append", metavar="NAME", default=[],
+                        help="Mark an account as a credit card / liability (repeatable)")
     args = parser.parse_args()
 
     if not args.db.exists():
@@ -121,9 +172,24 @@ def main() -> None:
         else:
             print("  transactions already current.")
 
+        if "'credit'" not in _table_sql(conn, "accounts"):
+            rebuild_accounts(conn)
+
         # statements table + any other new objects from the canonical schema.
         create_schema(conn)
+        if "income_basis" not in _columns(conn, "snapshots"):
+            conn.execute("ALTER TABLE snapshots ADD COLUMN income_basis TEXT")
+            print("  added snapshots.income_basis.")
         conn.commit()
+
+        if args.credit:
+            mark_credit(conn, args.credit)
+        candidates = card_account_candidates(conn)
+        if candidates:
+            print(f"  these accounts have credit-card statements but aren't type "
+                  f"'credit': {', '.join(candidates)}\n"
+                  f"  if they are the cards themselves, run: "
+                  f"python scripts/migrate.py --credit \"NAME\"")
 
         n = backfill_dedup(conn)
         print(f"  backfilled dedup_hash for {n} row(s).")

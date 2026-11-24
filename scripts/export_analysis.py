@@ -58,6 +58,11 @@ Please analyze and respond with:
    Frame emergency-fund and investment advice against these current conditions.
 5. **Caveat** — note that this is general analysis, not licensed financial advice.
 
+`income_basis` says where each month's income figure comes from: `actual` is
+income recorded in the ledger; `baseline` is the household's stated typical
+monthly income, used when no income was recorded — treat those months' savings
+rate as an estimate.
+
 Keep advice practical for a dual-income family of four. Where a recommendation
 depends on data not in the snapshots, say what additional info would help.
 
@@ -69,7 +74,7 @@ depends on data not in the snapshots, say what additional info would help.
 
 def fetch_snapshots(conn: sqlite3.Connection, months: list[str] | None,
                     latest: bool) -> list[dict]:
-    q = "SELECT month, total_income, total_expense, total_savings, savings_rate, " \
+    q = "SELECT month, total_income, income_basis, total_expense, total_savings, savings_rate, " \
         "net_worth, dti_ratio, category_totals, budget_status, goal_progress " \
         "FROM snapshots"
     params: tuple = ()
@@ -81,7 +86,7 @@ def fetch_snapshots(conn: sqlite3.Connection, months: list[str] | None,
     if latest:
         q += " DESC LIMIT 1"
 
-    cols = ["month", "total_income", "total_expense", "total_savings",
+    cols = ["month", "total_income", "income_basis", "total_expense", "total_savings",
             "savings_rate", "net_worth", "dti_ratio", "category_totals",
             "budget_status", "goal_progress"]
     out = []

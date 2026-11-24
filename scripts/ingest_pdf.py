@@ -45,11 +45,47 @@ _DATE_RE = re.compile(
     r"\b(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})\b")
 # A currency-ish number: 1.250.000  /  75,000  /  12.500,00  /  Rp 5000
 _MONEY_RE = re.compile(r"(?:rp\.?\s*)?(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2})?|\d{4,}(?:[.,]\d{2})?)", re.I)
-# Credit markers -> treat as income rather than expense. Deliberately strict:
-# a standalone 'CR' flag (not the substring in 'CREDIT'), or explicit terms.
+# Credit markers -> money coming in. Deliberately strict: a standalone 'CR'
+# flag (not the substring in 'CREDIT'), or explicit refund-type terms.
 _CREDIT_RE = re.compile(
-    r"(?:\bCR\b|\brefund\b|\bcashback\b|\breversal\b|\bpembayaran\b|\btop[\s-]?up\b)",
+    r"\bCR\b|\brefund\b|\bcashback\b|\breversal\b", re.I)
+
+# Moving money between your OWN accounts is a transfer, not spending/income.
+# Counting a card bill payment as an expense double-counts every card charge.
+# Card bill payment, as written on either statement:
+_CARD_PAYMENT_RE = re.compile(
+    r"\b(?:pembayaran|pemb\.?|bayar|byr|payment)\W*"
+    r"(?:kartu\s*kredit|credit\s*card|kk|cc)\b"        # bank side
+    r"|\b(?:pembayaran|payment)\W+(?:-\s*)?(?:terima\s*kasih|thank\s*you)",  # card side
     re.I)
+# On a card statement, any 'payment' line is the bill being paid.
+_PAYMENT_WORD_RE = re.compile(r"\b(?:pembayaran|payment)\b", re.I)
+# On a bank statement, a card mentioned without a fee word is a bill payment.
+_CARD_MENTION_RE = re.compile(r"kartu\s*kredit|credit\s*card", re.I)
+_FEE_RE = re.compile(r"\b(?:biaya|fee|iuran|annual|bunga|interest|denda)\b", re.I)
+# Top-ups of your own e-wallet. 'TOP UP PULSA' (phone credit) stays an expense.
+_TOPUP_RE = re.compile(r"\btop[\s-]?up\b|\btopup\b", re.I)
+_EWALLET_RE = re.compile(
+    r"\b(?:gopay|go-pay|ovo|dana|shopee\s*pay|linkaja|link\s*aja|isaku|flip)\b", re.I)
+
+DIRECTIONS = ("expense", "income", "transfer")
+
+
+def classify_direction(line: str, source_type: str | None = None) -> str:
+    """'transfer' for money moved between your own accounts (card bill
+    payments, e-wallet top-ups), 'income' for credits, else 'expense'."""
+    if _CARD_PAYMENT_RE.search(line):
+        return "transfer"
+    if source_type == "cc" and _PAYMENT_WORD_RE.search(line):
+        return "transfer"
+    if (source_type == "bank" and _CARD_MENTION_RE.search(line)
+            and not _FEE_RE.search(line)):
+        return "transfer"
+    if _TOPUP_RE.search(line) and (source_type == "ewallet" or _EWALLET_RE.search(line)):
+        return "transfer"
+    if _CREDIT_RE.search(line):
+        return "income"
+    return "expense"
 
 # Indonesian (and a few English) month names -> number, keyed by first 3 letters.
 _ID_MONTHS = {
@@ -199,7 +235,7 @@ def _money_tokens(line: str) -> list[tuple[str, int]]:
     return out
 
 
-def parse_statement_local(text: str) -> list[dict]:
+def parse_statement_local(text: str, source_type: str | None = None) -> list[dict]:
     """Best-effort: a line with a date and >=1 amount is a transaction row.
 
     Takes the LAST money token as the amount (statements usually put it in the
@@ -230,7 +266,7 @@ def parse_statement_local(text: str) -> list[dict]:
             "date": date,
             "description": desc or None,
             "amount": abs(amount),
-            "direction": "income" if _CREDIT_RE.search(line) else "expense",
+            "direction": classify_direction(line, source_type),
             "ambiguous": len(monies) > 1,
         })
     return rows
@@ -252,7 +288,7 @@ _AI_SCHEMA = {
                     "description": {"type": "string"},
                     "amount": {"type": "integer",
                                "description": "positive IDR integer, no decimals"},
-                    "direction": {"type": "string", "enum": ["expense", "income"]},
+                    "direction": {"type": "string", "enum": list(DIRECTIONS)},
                 },
                 "required": ["date", "description", "amount", "direction"],
                 "additionalProperties": False,
@@ -282,8 +318,11 @@ def parse_statement_ai(text: str, model: str) -> list[dict]:
     prompt = (
         "Extract every transaction from this Indonesian bank / credit-card / "
         "e-wallet statement text. Amounts are IDR — return them as positive "
-        "integers with no decimals or separators. Use direction 'income' for "
-        "credits/refunds/top-ups/cashback and 'expense' for purchases/debits. "
+        "integers with no decimals or separators. Use direction 'transfer' for "
+        "money moved between the holder's own accounts — credit-card bill "
+        "payments (on either the bank or the card statement) and e-wallet "
+        "top-ups; 'income' for other credits/refunds/cashback; and 'expense' "
+        "for purchases/debits. "
         "Ignore summary lines, balances, fees headers, and totals. Dates as "
         "ISO YYYY-MM-DD.\n\n--- STATEMENT TEXT ---\n" + text
     )
@@ -309,7 +348,8 @@ def parse_statement_ai(text: str, model: str) -> list[dict]:
             "date": date,
             "description": (t.get("description") or "").strip() or None,
             "amount": abs(int(amount)),
-            "direction": "income" if t.get("direction") == "income" else "expense",
+            "direction": (t.get("direction") if t.get("direction") in DIRECTIONS
+                          else "expense"),
             "ambiguous": False,
         })
     return rows
@@ -370,6 +410,14 @@ def ingest(paths: list[Path], db_path: Path, account: str | None,
             if account_id is None:
                 raise SystemExit(f"Unknown account: {account!r}. "
                                  f"Known: {sorted(accounts)}")
+            if source_type == "cc":
+                acct_type = conn.execute("SELECT type FROM accounts WHERE id=?",
+                                         (account_id,)).fetchone()[0]
+                if acct_type != "credit":
+                    print(f"  note: {account!r} is type {acct_type!r}. If it is the "
+                          "card itself, mark it as a liability so refunds aren't "
+                          "counted as income:\n"
+                          f"    python scripts/migrate.py --credit {account!r}")
 
         for path in paths:
             fhash = file_sha256(path)
@@ -396,8 +444,12 @@ def ingest(paths: list[Path], db_path: Path, account: str | None,
                 else:
                     print("  [PII] WARNING: --no-redact — raw text will be sent to Claude")
                 parsed = parse_statement_ai(text, model)
+                # Backstop: the local rules win when they spot a transfer.
+                for p in parsed:
+                    if classify_direction(p["description"] or "", source_type) == "transfer":
+                        p["direction"] = "transfer"
             else:
-                parsed = parse_statement_local(text)
+                parsed = parse_statement_local(text, source_type)
             if not parsed:
                 print("  ! no transactions parsed. "
                       "Try --ai, or check the extracted text.")
@@ -417,13 +469,21 @@ def ingest(paths: list[Path], db_path: Path, account: str | None,
                 merch = redact_field(p["description"])
                 cat_id = (merchants_simple.get(merch.lower()) if merch else None) \
                     or match_category(merch or "", mapping)
-                if cat_id is None:
+                if cat_id is None and p["direction"] == "expense":
                     uncategorized += 1
                 rows.append((p["date"], p["amount"], p["direction"], cat_id,
                              merch, account_id, None, "statement", None))
 
             if uncategorized:
                 print(f"  {uncategorized} uncategorized (run categorize.py later)")
+            transfers = sum(1 for p in parsed if p["direction"] == "transfer")
+            if transfers:
+                print(f"  {transfers} transfer(s) (card payments / top-ups) — "
+                      "excluded from income and spending")
+            transfers = sum(1 for p in parsed if p["direction"] == "transfer")
+            if transfers:
+                print(f"  {transfers} transfer(s) (card payments / top-ups) — "
+                      "excluded from income and spending")
 
             if dry_run:
                 for p in parsed[:8]:

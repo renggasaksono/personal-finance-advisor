@@ -33,8 +33,10 @@ _EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _NPWP = re.compile(r"\b\d{2}\.\d{3}\.\d{3}\.\d-\d{3}\.\d{3}\b")
 # Indonesian mobile: 08xxxxxxxx / +628xxxxxxxx / 628xxxxxxxx
 _PHONE = re.compile(r"(?<!\d)(?:\+?62|0)8\d[\d\s-]{6,13}\d(?!\d)")
-# Card printed in groups of 4 (13-19 digits total).
-_CARD_GROUPS = re.compile(r"\b(?:\d[ -]?){12,18}\d\b")
+# Card printed in groups of 4 (13-19 digits total). The trailing lookahead stops
+# the match from hopping a space into an adjacent amount: without it,
+# '4111 1111 1111 1111 1.250.000' swallowed the amount's leading '1'.
+_CARD_GROUPS = re.compile(r"\b(?:\d[ -]?){12,18}\d\b(?![.,]\d)")
 # A bare run of >=10 digits with no separators on either side (account/card).
 # The (?<![\d.,]) / (?![\d.,]) guards keep separator-formatted amounts safe.
 _LONG_DIGITS = re.compile(r"(?<![\d.,])\d{10,}(?![\d.,])")
@@ -99,7 +101,10 @@ def redact(text: str) -> tuple[str, Counter]:
 
 
 # Common Indonesian address / label lead-ins for best-effort line handling.
-_ADDR_HINT = re.compile(r"\b(jl\.?|jalan|kel\.|kec\.|rt\s?\d|rw\s?\d|kode pos)\b", re.I)
+# No blanket trailing \b: it can't follow a '.' + space ('Kel. Menteng') or sit
+# between digits ('RT 002'), which silently disabled those alternatives.
+_ADDR_HINT = re.compile(
+    r"\b(?:jl\b|jalan\b|kel\.|kec\.|rt\.?\s?\d+\b|rw\.?\s?\d+\b|kode\s?pos\b)", re.I)
 
 
 def redact_names(text: str) -> tuple[str, int]:
