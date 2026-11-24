@@ -215,3 +215,27 @@ def test_profile_amounts_are_normalised(run, conn, capsys):
 def test_missing_db(tmp_path):
     with pytest.raises(SetupError, match="init_db"):
         setup.main(["--db", str(tmp_path / "nope.db"), "account", "list"])
+
+
+@pytest.mark.parametrize("argv,expected", [
+    (["account", "add", "X", "--type", "bank", "--balance", "-200rb"], "-200rb"),
+    (["account", "set", "X", "--balance", "-1,5jt"], "-1,5jt"),
+    (["goal", "contribute", "Fund", "-1jt", "--date", "2026-11-15"], "-1jt"),
+])
+def test_negative_amounts_are_values_not_options(argv, expected):
+    """Regression: Python < 3.14 argparse read '-200rb' as an unknown option.
+    The CI matrix runs this on 3.12 as well as 3.14."""
+    args = setup.build_parser().parse_args(argv)
+    assert expected in (getattr(args, "balance", None), getattr(args, "amount", None))
+
+
+def test_negative_matcher_applies_to_every_subcommand():
+    def walk(parser):
+        yield parser
+        for action in parser._actions:
+            for sub in getattr(action, "choices", None) or {}:
+                if isinstance(action.choices, dict):
+                    yield from walk(action.choices[sub])
+    parsers = list(walk(setup.build_parser()))
+    assert len(parsers) > 20
+    assert all(p._negative_number_matcher.match("-200rb") for p in parsers)

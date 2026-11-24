@@ -465,8 +465,23 @@ def profile_show(conn, a) -> None:
 # CLI
 # --------------------------------------------------------------------------
 
+class _Parser(argparse.ArgumentParser):
+    """Treat '-200rb' / '-1jt' / '-Rp 45.000' as negative values, not options.
+
+    Before Python 3.14, argparse only recognised bare numbers ('-5', '-1.5')
+    as negative, so `--balance -200rb` failed with "expected one argument".
+    This applies 3.14's rule (a dash then a digit) on every version; no option
+    here starts with a digit, so nothing real is shadowed. Subparsers inherit
+    this class, so every subcommand gets it.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._negative_number_matcher = re.compile(r"-\.?\d")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Manage accounts, debts, goals, budgets, "
+    p = _Parser(description="Manage accounts, debts, goals, budgets, "
                                 "categories and the household profile.")
     p.add_argument("--db", type=Path, default=DEFAULT_DB,
                    help=f"SQLite DB path (default: {DEFAULT_DB})")
