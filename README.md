@@ -22,6 +22,16 @@ python scripts/init_db.py --reset --seed    # fresh DB (data/finance.db) with sa
 # upgrading an existing DB created before dedup/statements:
 python scripts/migrate.py
 ```
+### Tests
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+Every test uses a throwaway SQLite DB in a temp dir — nothing touches
+`data/finance.db`, your `.env`, the network, or Tesseract (OCR and PDF text
+extraction are stubbed). Known bugs are pinned as `xfail(strict=True)` tests,
+so fixing one makes the suite tell you to drop the marker.
+
 Receipt/scanned-PDF OCR also needs the Tesseract binary
 (`brew install tesseract tesseract-lang` on macOS). The `--ai` PDF parser and
 `export_analysis.py` are the only features that can talk to the network, and
