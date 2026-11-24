@@ -33,10 +33,13 @@ SCHEMA = """
 -- ===== Core cash flow ===================================================
 
 -- Labels only; not live-linked to any bank / e-wallet.
+-- 'credit' marks a liability account (credit card / paylater): its income
+-- rows are refunds, not household income, and its balance is money owed.
 CREATE TABLE IF NOT EXISTS accounts (
     id               INTEGER PRIMARY KEY,
     name             TEXT    NOT NULL UNIQUE,
-    type             TEXT    NOT NULL CHECK (type IN ('bank', 'cash', 'ewallet', 'other')),
+    type             TEXT    NOT NULL
+                             CHECK (type IN ('bank', 'cash', 'ewallet', 'credit', 'other')),
     starting_balance INTEGER NOT NULL DEFAULT 0,
     currency         TEXT    NOT NULL DEFAULT 'IDR'
 );
@@ -200,6 +203,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
     id               INTEGER PRIMARY KEY,
     month            TEXT    NOT NULL UNIQUE,   -- 'YYYY-MM'
     total_income     INTEGER NOT NULL,
+    income_basis     TEXT,                       -- 'actual' (ledger) | 'baseline' (profile)
     total_expense    INTEGER NOT NULL,
     total_savings    INTEGER NOT NULL,
     savings_rate     REAL,                      -- fraction 0..1

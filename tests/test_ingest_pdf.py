@@ -41,7 +41,7 @@ def test_parse_statement_local_bca():
     assert simple == [
         ("2025-10-06", 125_000, "expense"),
         ("2025-10-15", 1_250_000, "expense"),
-        ("2025-10-20", 3_000_000, "income"),   # 'CR' / 'PEMBAYARAN' = credit
+        ("2025-10-20", 3_000_000, "transfer"),  # card bill payment, not income
         ("2024-12-28", 50_000, "expense"),     # Dec > Nov anchor -> prior year
     ]
     assert rows[0]["description"] == "INDOMARET JAKARTA"
@@ -54,6 +54,33 @@ def test_parse_statement_local_flags_running_balance():
     rows = parse_statement_local("2026-08-01 GRAB 45.000 1.955.000")
     assert rows[0]["amount"] == 1_955_000      # trailing column taken
     assert rows[0]["ambiguous"] is True
+
+
+@pytest.mark.parametrize("line,source_type,expected", [
+    # Card bill payment — card side and bank side are both transfers.
+    ("PEMBAYARAN - TERIMA KASIH 3.000.000 CR", None, "transfer"),
+    ("PAYMENT THANK YOU 3.000.000 CR", "cc", "transfer"),
+    ("PEMBAYARAN VIA MYBCA 3.000.000 CR", "cc", "transfer"),
+    ("PEMBAYARAN KARTU KREDIT BCA 3.000.000", "bank", "transfer"),
+    ("BAYAR KK MANDIRI 1.500.000", None, "transfer"),
+    ("TRSF E-BANKING DB KARTU KREDIT 1.500.000", "bank", "transfer"),
+    # ...but card fees and other bills are still spending.
+    ("BIAYA TAHUNAN KARTU KREDIT 300.000", "bank", "expense"),
+    ("BIAYA TAHUNAN KARTU 300.000", "cc", "expense"),
+    ("PEMBAYARAN PLN PRABAYAR 250.000", "bank", "expense"),  # used to be 'income'
+    # E-wallet top-ups move your own money; phone-credit top-ups are spending.
+    ("TOP UP GOPAY 500.000", "bank", "transfer"),
+    ("OVO TOPUP 200.000", None, "transfer"),
+    ("Top Up 500.000", "ewallet", "transfer"),
+    ("TOP UP PULSA TELKOMSEL 100.000", "bank", "expense"),
+    # Real credits are still income.
+    ("REFUND TOKOPEDIA 125.000", "cc", "income"),
+    ("CASHBACK 10.000 CR", "ewallet", "income"),
+    ("TRANSFER MASUK GAJI 15.000.000 CR", "bank", "income"),
+    ("INDOMARET 125.000", "cc", "expense"),
+])
+def test_classify_direction(line, source_type, expected):
+    assert ingest_pdf.classify_direction(line, source_type) == expected
 
 
 def test_credit_regex_does_not_match_inside_words():
@@ -160,3 +187,15 @@ def test_collect_pdfs(tmp_path):
     assert [p.name for p in ingest_pdf.collect_pdfs(tmp_path)] == ["a.pdf", "b.PDF"]
     with pytest.raises(SystemExit):
         ingest_pdf.collect_pdfs(tmp_path / "c.txt")
+
+
+def test_ai_rows_get_transfer_backstop(seeded_db_path, seeded_conn, tmp_path, monkeypatch):
+    p = tmp_path / "x.pdf"
+    p.write_bytes(b"x")
+    monkeypatch.setattr(ingest_pdf, "extract_text", lambda path, pw=None: ("t", "text"))
+    monkeypatch.setattr(ingest_pdf, "parse_statement_ai", lambda t, m: [
+        {"date": "2026-08-01", "description": "PEMBAYARAN KARTU KREDIT",
+         "amount": 3_000_000, "direction": "expense", "ambiguous": False}])
+    ingest_pdf.ingest([p], seeded_db_path, None, "bank", True, "m", False, False)
+    assert seeded_conn.execute("SELECT type FROM transactions WHERE source='statement'"
+                               ).fetchone()[0] == "transfer"

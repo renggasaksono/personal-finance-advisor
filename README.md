@@ -19,8 +19,10 @@ Claude export are all in `scripts/`.
 ```bash
 pip install -r requirements.txt             # pandas/openpyxl/pillow/pytesseract/pdfplumber/...
 python scripts/init_db.py --reset --seed    # fresh DB (data/finance.db) with sample data
-# upgrading an existing DB created before dedup/statements:
+# upgrading an existing DB (safe to re-run after every pull):
 python scripts/migrate.py
+# mark credit cards / paylater as liability accounts (refunds aren't income):
+python scripts/migrate.py --credit "BCA Card"
 ```
 ### Tests
 ```bash
@@ -55,6 +57,7 @@ python scripts/ingest.py data/statements/bca.pdf --type cc --password '...'  # o
 # 2b. Reconcile fuzzy cross-source duplicates (e.g. receipt + card statement)
 python scripts/reconcile.py --cross-only
 python scripts/reconcile.py --drop 42        # remove one reviewed row by id
+python scripts/reconcile.py --mark-transfer 42 57   # re-type own-account moves
 
 # 3. Categorize unknown merchants (learning loop feeds future ingests)
 python scripts/categorize.py list
@@ -87,7 +90,7 @@ python scripts/dropbox_sync.py pull --folder /Finance/Inbox --account "BCA Check
 | Script | Purpose |
 |--------|---------|
 | `init_db.py` | Create the SQLite schema; `--seed` loads sample data |
-| `migrate.py` | Upgrade an existing DB to the current schema (dedup + statements) |
+| `migrate.py` | Upgrade an existing DB to the current schema; `--credit NAME` marks a card account |
 | `ingest.py` | **Unified entry point** — auto-routes any file/folder by type |
 | `ingest_core.py` | Shared dedup + insert (one place all ingesters write through) |
 | `ingest_sheet.py` | CSV/XLSX → `transactions` (pandas, IDR/date parsing) |
@@ -100,6 +103,28 @@ python scripts/dropbox_sync.py pull --folder /Finance/Inbox --account "BCA Check
 | `export_analysis.py` | Snapshots → paste-ready, Indonesia-localized Claude prompt |
 | `dropbox_sync.py` | Pull sheets/receipts/PDFs from a Dropbox folder into the pipeline |
 | `dropbox_auth.py` | One-time helper to obtain a long-lived Dropbox refresh token |
+
+## Income and transfers
+A snapshot's income is the **income actually recorded that month** (salary
+rows, freelance payments, etc.). If none was recorded — say you've only
+imported card statements so far — it falls back to `monthly_income_total` from
+`family_profile`. Each snapshot says which via `income_basis`
+(`actual` / `baseline`), and the export tells Claude to treat baseline months
+as estimates. Refunds and cashback on `credit` accounts are not income.
+
+Moving money between your own accounts is a **transfer**: it counts as neither
+income nor spending. The PDF parser marks these automatically:
+- credit-card bill payments, on the bank statement (`PEMBAYARAN KARTU KREDIT`,
+  `BAYAR KK`) and on the card statement (`PEMBAYARAN - TERIMA KASIH`, or any
+  payment line with `--type cc`)
+- e-wallet top-ups (`TOP UP GOPAY`, or any top-up with `--type ewallet`).
+  Phone-credit top-ups (`TOP UP PULSA`) stay spending.
+
+Without this, importing both a bank and a card statement counted the card bill
+as spending on top of the card charges it pays for. Rows imported before this
+change can be fixed with `reconcile.py --mark-transfer ID ...` (the plain
+`reconcile.py` listing shows the bank/card payment pair: same amount, close
+dates). Then re-run `generate_snapshot.py --all`.
 
 ## Deduplication
 Every ingested row gets a content hash (`dedup_hash`), so re-importing a sheet

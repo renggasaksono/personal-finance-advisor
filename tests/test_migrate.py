@@ -85,3 +85,54 @@ def test_missing_db(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["migrate.py", "--db", str(tmp_path / "nope.db")])
     with pytest.raises(SystemExit):
         migrate.main()
+
+
+def _previous_schema_db(tmp_path):
+    """A DB from the release before 'credit' accounts / income_basis."""
+    old = (init_db.SCHEMA
+           .replace("'bank', 'cash', 'ewallet', 'credit', 'other'",
+                    "'bank', 'cash', 'ewallet', 'other'")
+           .replace("    income_basis     TEXT,                       "
+                    "-- 'actual' (ledger) | 'baseline' (profile)\n", ""))
+    assert "credit" not in old.split("CREATE TABLE IF NOT EXISTS categories")[0].split("accounts (")[1]
+    assert "income_basis" not in old
+    path = tmp_path / "prev.db"
+    c = init_db.connect(path)
+    c.executescript(old)
+    init_db.seed(c)
+    c.execute("INSERT INTO accounts (id, name, type) VALUES (9, 'BCA Card', 'other')")
+    c.execute("INSERT INTO statements (file_hash, source_type, account_id) VALUES ('h', 'cc', 9)")
+    c.execute("INSERT INTO snapshots (month, total_income, total_expense, total_savings) "
+              "VALUES ('2026-08', 1, 1, 0)")
+    c.commit()
+    c.close()
+    return path
+
+
+def test_upgrades_accounts_and_snapshots(tmp_path, monkeypatch, capsys):
+    path = _previous_schema_db(tmp_path)
+    _run(path, monkeypatch)
+    out = capsys.readouterr().out
+    assert "BCA Card" in out and "--credit" in out      # candidate reported...
+    c = init_db.connect(path)
+    assert c.execute("SELECT type FROM accounts WHERE id=9").fetchone()[0] == "other"  # ...not changed
+    assert "income_basis" in migrate._columns(c, "snapshots")
+    assert c.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == 5
+    # FKs from children still resolve to the rebuilt accounts table.
+    assert c.execute("PRAGMA foreign_key_check").fetchall() == []
+    c.execute("INSERT INTO transactions (date, amount, account_id) VALUES ('2026-08-01', 1, 9)")
+    with pytest.raises(sqlite3.IntegrityError):
+        c.execute("INSERT INTO transactions (date, amount, account_id) VALUES ('2026-08-01', 1, 999)")
+    c.close()
+
+
+def test_credit_flag_marks_account(tmp_path, monkeypatch):
+    path = _previous_schema_db(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["migrate.py", "--db", str(path), "--credit", "bca card"])
+    migrate.main()
+    c = init_db.connect(path)
+    assert c.execute("SELECT type FROM accounts WHERE id=9").fetchone()[0] == "credit"
+    c.close()
+    monkeypatch.setattr(sys, "argv", ["migrate.py", "--db", str(path), "--credit", "Nope"])
+    with pytest.raises(SystemExit, match="Unknown account"):
+        migrate.main()

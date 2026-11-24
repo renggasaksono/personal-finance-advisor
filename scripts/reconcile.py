@@ -15,6 +15,10 @@ Usage:
     python scripts/reconcile.py --days 5
     python scripts/reconcile.py --cross-only    # only across different sources
     python scripts/reconcile.py --drop 42       # delete one transaction by id
+    python scripts/reconcile.py --mark-transfer 42 57
+        # re-type rows as transfers, e.g. a card bill payment imported before
+        # transfers were detected (shows as an expense on the bank statement
+        # AND income on the card statement — same amount, a few days apart)
 """
 from __future__ import annotations
 
@@ -69,6 +73,18 @@ def cmd_drop(conn, tid: int) -> None:
     print("Deleted.")
 
 
+def cmd_mark_transfer(conn, ids: list[int]) -> None:
+    for tid in ids:
+        row = conn.execute("SELECT date, amount, type, merchant FROM transactions "
+                           "WHERE id=?", (tid,)).fetchone()
+        if not row:
+            raise SystemExit(f"No transaction with id {tid}.")
+        conn.execute("UPDATE transactions SET type='transfer' WHERE id=?", (tid,))
+        print(f"id {tid}: {row[0]}  {row[1]:,} IDR  {row[2]} -> transfer  {row[3] or ''}")
+    conn.commit()
+    print("Re-run generate_snapshot.py to refresh affected months.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Reconcile duplicate transactions.")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -78,12 +94,16 @@ def main() -> None:
                         help="Only pairs from different sources")
     parser.add_argument("--drop", type=int, metavar="ID",
                         help="Delete one transaction by id (after review)")
+    parser.add_argument("--mark-transfer", type=int, nargs="+", metavar="ID",
+                        help="Re-type transactions as transfers (own-account moves)")
     args = parser.parse_args()
 
     conn = connect(args.db)
     try:
         if args.drop is not None:
             cmd_drop(conn, args.drop)
+        elif args.mark_transfer:
+            cmd_mark_transfer(conn, args.mark_transfer)
         else:
             cmd_list(conn, args.days, args.cross_only)
     finally:

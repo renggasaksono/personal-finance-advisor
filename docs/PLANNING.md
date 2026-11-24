@@ -58,10 +58,10 @@ Images/receipts/PDFs are **not retained** after parsing — processed in-memory 
 ## Database Schema (SQLite)
 
 ### Core cash flow
-- `accounts` — bank/cash/e-wallet labels (not live-linked)
+- `accounts` — bank/cash/e-wallet/credit labels (not live-linked); `credit` = liability (card, paylater)
 - `categories` — fixed / variable / irregular, with parent/child structure
 - `merchant_category_map` — learned merchant -> category mapping, built up over time
-- `transactions` — raw ledger (local only, never transmitted); carries `dedup_hash` + `external_ref` for deduplication and `source` ∈ manual/sheet/receipt/statement
+- `transactions` — raw ledger (local only, never transmitted); carries `dedup_hash` + `external_ref` for deduplication and `source` ∈ manual/sheet/receipt/statement; `type` ∈ expense/income/transfer (transfer = own-account move: card bill payment, e-wallet top-up)
 - `budgets` — target % of income per category per month (not fixed numbers, since income varies)
 
 ### Goals & family
@@ -77,7 +77,7 @@ Images/receipts/PDFs are **not retained** after parsing — processed in-memory 
 - `debts` — liabilities with current_balance, interest_rate, monthly_payment, linked_asset_id
 
 ### Reporting & provenance
-- `snapshots` — monthly rollup (income, expense, savings rate, category totals, goal progress). **This is the only table whose contents get sent to Claude for analysis** (via `export_analysis.py`).
+- `snapshots` — monthly rollup (income + `income_basis` actual/baseline, expense, savings rate, category totals, goal progress). **This is the only table whose contents get sent to Claude for analysis** (via `export_analysis.py`).
 - `statements` — one row per ingested PDF/statement file, tracked by `file_hash` so re-importing the same file is a no-op (period, source_type, row_count).
 
 Net worth formula:
