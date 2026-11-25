@@ -25,6 +25,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from classify import is_card_payment  # noqa: E402
 from init_db import DEFAULT_DB, connect  # noqa: E402
 
 
@@ -140,13 +141,18 @@ def net_worth(conn: sqlite3.Connection, month: str) -> int:
     excluded = {aid for aid, name in conn.execute("SELECT id, name FROM accounts")
                 if name.strip().lower() in debt_names}
 
-    # Account balances: starting + income - expense (transfers net to zero).
+    # Account balances: starting + income - expense. Transfers between two
+    # ledger accounts net to zero, but a card-bill payment to a card that is
+    # represented by its debts row has no other side here: the money really
+    # leaves the paying account (and the debt balance is maintained by hand).
     start = sum(sb for aid, sb in
                 conn.execute("SELECT id, starting_balance FROM accounts")
                 if aid not in excluded)
+    credit_ids = {aid for (aid,) in
+                  conn.execute("SELECT id FROM accounts WHERE type='credit'")}
     delta = 0
-    for aid, typ, amount in conn.execute(
-        "SELECT account_id, type, amount FROM transactions "
+    for aid, typ, amount, merchant in conn.execute(
+        "SELECT account_id, type, amount, merchant FROM transactions "
         "WHERE account_id IS NOT NULL AND substr(date,1,7) <= ?", (month,)
     ):
         if aid in excluded:
@@ -155,6 +161,9 @@ def net_worth(conn: sqlite3.Connection, month: str) -> int:
             delta -= amount
         elif typ == "income":
             delta += amount
+        elif (typ == "transfer" and excluded and aid not in credit_ids
+              and is_card_payment(merchant or "")):
+            delta -= amount
     accounts_total = start + delta
 
     # Latest valuation per investment, as of month end.

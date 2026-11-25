@@ -93,6 +93,12 @@ def load_context(conn: sqlite3.Connection) -> Context:
     )
 
 
+def is_card_payment(line: str) -> bool:
+    """A bank/wallet line paying a credit-card bill (not a card fee)."""
+    return bool(_CARD_PAYMENT_RE.search(line) or (
+        _CARD_MENTION_RE.search(line) and not _FEE_RE.search(line)))
+
+
 def is_transfer(line: str, source_type: str | None = None,
                 ctx: Context | None = None) -> bool:
     """True when the line moves money between the household's own accounts."""

@@ -111,3 +111,48 @@ def test_snapshot_has_no_merchant_or_member_detail(seeded_conn):
     blob = json.dumps(gs.build_snapshot(seeded_conn, "2026-08"))
     for leaked in ("Indomaret", "Cinema XXI", "Istri", "Anak 2", "Bank Mandiri"):
         assert leaked not in blob
+
+
+def _card_as_debt(c):
+    c.execute("INSERT INTO accounts (id, name, type) VALUES (5, 'BCA Card', 'credit')")
+    c.execute("INSERT INTO debts (name, current_balance) VALUES ('BCA Card', 2000000)")
+
+
+def test_card_payment_to_debt_card_leaves_paying_account(seeded_conn):
+    """The card is represented by its debts row, so a bill payment from the
+    bank has no other side in the ledger: the bank balance must drop."""
+    c = seeded_conn
+    _card_as_debt(c)
+    commit_transactions(c, [
+        ("2026-08-20", 1_100_000, "transfer", None,
+         "KARTU KREDIT/PL / 0100 BCA CARD [CARD] BUDI SANTOSO", 1, None, "sheet", None),
+        ("2026-08-21", 1_200_000, "transfer", None,
+         "PEMBAYARAN KARTU KREDIT BCA", 1, None, "sheet", None),
+        # The same payment seen on the card's own statement: card is excluded.
+        ("2026-08-22", 1_100_000, "transfer", None, "PEMBAYARAN - MYBCA", 5, None,
+         "statement", None),
+    ])
+    s = gs.build_snapshot(c, "2026-08")
+    assert s["net_worth"] == (SEED_START - SEED_EXPENSE) - 2_300_000 - 2_000_000
+    assert s["total_expense"] == SEED_EXPENSE        # still not spending
+
+
+def test_other_transfers_still_net_to_zero(seeded_conn):
+    c = seeded_conn
+    _card_as_debt(c)
+    commit_transactions(c, [
+        ("2026-08-20", 500_000, "transfer", None, "TOPUP GOPAY", 1, None, "sheet", None),
+        ("2026-08-21", 9_000, "transfer", None, "BIAYA KARTU KREDIT", 1, None, "sheet", None),
+    ])
+    assert gs.build_snapshot(c, "2026-08")["net_worth"] == \
+        (SEED_START - SEED_EXPENSE) - 2_000_000
+
+
+def test_card_payment_without_debt_row_nets_to_zero(seeded_conn):
+    """A credit account with no debts row is in the ledger itself, so its
+    payment is a real two-sided transfer and changes nothing."""
+    c = seeded_conn
+    c.execute("INSERT INTO accounts (id, name, type) VALUES (5, 'BCA Card', 'credit')")
+    commit_transactions(c, [("2026-08-20", 1_100_000, "transfer", None,
+                             "PEMBAYARAN KARTU KREDIT BCA", 1, None, "sheet", None)])
+    assert gs.build_snapshot(c, "2026-08")["net_worth"] == SEED_START - SEED_EXPENSE
