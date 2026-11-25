@@ -72,3 +72,15 @@ def test_seed_without_card_or_owner(seeded_conn):
     ctx = load_context(seeded_conn)
     assert not ctx.has_credit_account and ctx.owner_names == ()
     assert classify_direction("PEMBAYARAN KARTU KREDIT BCA 3.000.000", "bank", ctx) == "expense"
+
+
+@pytest.mark.parametrize("line,expected", [
+    (CARD_PAY, True),
+    ("PEMBAYARAN KARTU KREDIT BCA 3.000.000", True),
+    ("BIAYA KARTU KREDIT", False),
+    (GOPAY_VA, False),
+    (OWN_OUT, False),
+])
+def test_is_card_payment(line, expected):
+    from classify import is_card_payment
+    assert is_card_payment(line) is expected
