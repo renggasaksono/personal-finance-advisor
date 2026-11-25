@@ -190,6 +190,8 @@ def test_collect_pdfs(tmp_path):
 
 
 def test_ai_rows_get_transfer_backstop(seeded_db_path, seeded_conn, tmp_path, monkeypatch):
+    seeded_conn.execute("INSERT INTO accounts (name, type) VALUES ('BCA Card', 'credit')")
+    seeded_conn.commit()
     p = tmp_path / "x.pdf"
     p.write_bytes(b"x")
     monkeypatch.setattr(ingest_pdf, "extract_text", lambda path, pw=None: ("t", "text"))
