@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Merchant categorization + merchant_category_map learning loop.
 
-After ingestion, some transactions have no category (unknown merchant). This
-tool lets you:
+After ingestion, some spending has no category (unknown merchant). Income and
+transfers are never categorized. Bank descriptions are grouped by a stable
+merchant name (merchant_key), so one answer covers every row from that
+merchant now and in future imports. This tool lets you:
 
-    list     show uncategorized transactions, grouped by merchant
+    list     show uncategorized spending, grouped by merchant
     apply    re-apply the current merchant_category_map to uncategorized rows
              (useful after the map grows)
     set      map a merchant -> category, then backfill matching rows
@@ -25,6 +27,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
 import sqlite3
 import sys
 from datetime import date
@@ -81,14 +84,70 @@ def load_map(conn: sqlite3.Connection) -> list[tuple[str, int]]:
             conn.execute("SELECT merchant_name, category_id FROM merchant_category_map")]
 
 
+# --- Stable merchant names from bank descriptions --------------------------
+# Bank exports put dates and reference numbers in the description
+# ('TRANSAKSI DEBIT / TGL: 0902 QR 914 00000.00Soto Lamon'), so the raw text
+# differs every month. merchant_key() cuts out the part that names who was
+# paid. It is always a substring of the description, so a mapping saved under
+# it matches future rows through the existing substring matching.
+_KEY_RULES = [
+    # Bank fees: one key per fee kind, wherever they appear.
+    re.compile(r"\b(BIAYA\s+TXN|BIAYA\s+ADM|FEE\s+TRF(?:\s+QR)?)\b", re.I),
+    # Cash out.
+    re.compile(r"^(TARIKAN\s+ATM)\b", re.I),
+    re.compile(r"\b(WITHDRAWAL)\b", re.I),
+    # QR payment: 'QR 914 00000.00<merchant>'.
+    re.compile(r"\bQRC?\s+\d+\s+[\d.,]+\s*(\S.*)$", re.I),
+    # Debit card at a domestic merchant: 'TRN DEBIT DOM 002 <merchant>'.
+    re.compile(r"\bTRN\s+DEBIT\s+DOM\s+\d+\s+(\S.*)$", re.I),
+    # Transfer to/from a person: 'TRANSFER KE 008 <name>', 'TRF QR KE 915 <name>'.
+    re.compile(r"\b(?:TRANSFER|TRF(?:\s+QR)?)\s+(?:KE|DR)\s+\d+\s+(\S.*)$", re.I),
+    # Virtual-account bill payment: '... / 15918/ASTRO / ...'.
+    re.compile(r"/FTFVA/.*? / \d+/([^/]*?[A-Za-z][^/]*?)(?: / |$)", re.I),
+]
+# Trailing noise after a person's or shop's name.
+_KEY_TAIL = re.compile(r"\s+(?:M-BCA|MBKBKE\b.*|Kota\b.*)$", re.I)
+_KEY_SKIP = re.compile(r"^\[|^[\d\s.,/:-]*$")   # masked tokens, numbers, amounts
+
+
+def merchant_key(description: str | None) -> str:
+    """Stable merchant name inside a (possibly bank-style) description."""
+    if not description:
+        return ""
+    text = description.strip()
+    for rule in _KEY_RULES:
+        m = rule.search(text)
+        if m:
+            key = _KEY_TAIL.sub("", m.group(1)).strip(" /")
+            if key:
+                return key
+    segments = [s.strip() for s in text.split(" / ") if s.strip()]
+    if len(segments) == 1:
+        return segments[0]
+    # Otherwise the last meaningful segment names the counterparty
+    # ('TRSF E-BANKING DB / ... / 25000.00 / <recipient>', 'KARTU DEBIT / <shop>').
+    for seg in reversed(segments[1:]):
+        if not _KEY_SKIP.search(seg):
+            return _KEY_TAIL.sub("", seg).strip()
+    return segments[0]
+
+
 def uncategorized_merchants(conn: sqlite3.Connection):
-    """Distinct merchants among uncategorized transactions, with counts/totals."""
-    return conn.execute(
-        "SELECT COALESCE(merchant, '(no merchant)') AS m, "
-        "       COUNT(*) AS n, SUM(amount) AS total "
-        "FROM transactions WHERE category_id IS NULL "
-        "GROUP BY m ORDER BY total DESC"
-    ).fetchall()
+    """Uncategorized SPENDING grouped by merchant_key, largest total first.
+
+    Returns [(key, count, total, example_description, [ids])]. Income and
+    transfers are left out: categories only describe what money was spent on.
+    """
+    groups: dict[str, list] = {}
+    for tid, merchant, amount in conn.execute(
+            "SELECT id, merchant, amount FROM transactions "
+            "WHERE category_id IS NULL AND type='expense'"):
+        key = merchant_key(merchant) or "(no merchant)"
+        g = groups.setdefault(key.lower(), [key, 0, 0, merchant or "", []])
+        g[1] += 1
+        g[2] += amount
+        g[4].append(tid)
+    return sorted((tuple(g) for g in groups.values()), key=lambda g: -g[2])
 
 
 def upsert_mapping(conn: sqlite3.Connection, merchant: str, category_id: int) -> None:
@@ -103,10 +162,10 @@ def upsert_mapping(conn: sqlite3.Connection, merchant: str, category_id: int) ->
 
 
 def backfill(conn: sqlite3.Connection, merchant: str, category_id: int) -> int:
-    """Assign category to uncategorized rows whose merchant matches (ci, substring)."""
+    """Assign category to uncategorized spending whose merchant matches (ci, substring)."""
     cur = conn.execute(
         "UPDATE transactions SET category_id=? "
-        "WHERE category_id IS NULL AND merchant IS NOT NULL AND ("
+        "WHERE category_id IS NULL AND type='expense' AND merchant IS NOT NULL AND ("
         "  LOWER(merchant)=LOWER(?) "
         "  OR INSTR(LOWER(merchant), LOWER(?))>0 "
         "  OR INSTR(LOWER(?), LOWER(merchant))>0)",
@@ -124,10 +183,10 @@ def cmd_list(conn: sqlite3.Connection) -> None:
     if not rows:
         print("No uncategorized transactions. ")
         return
-    print(f"Uncategorized merchants ({len(rows)}):\n")
+    print(f"Uncategorized spending by merchant ({len(rows)}):\n")
     print(f"  {'merchant':<32} {'count':>5} {'total (IDR)':>14}")
     print(f"  {'-'*32} {'-'*5} {'-'*14}")
-    for m, n, total in rows:
+    for m, n, total, _example, _ids in rows:
         print(f"  {m[:32]:<32} {n:>5} {total:>14,}")
 
 
@@ -137,7 +196,7 @@ def cmd_apply(conn: sqlite3.Connection) -> None:
         print("merchant_category_map is empty; nothing to apply.")
         return
     rows = conn.execute(
-        "SELECT id, merchant FROM transactions WHERE category_id IS NULL"
+        "SELECT id, merchant FROM transactions WHERE category_id IS NULL AND type='expense'"
     ).fetchall()
     updated = 0
     for tid, merchant in rows:
@@ -169,11 +228,19 @@ def cmd_review(conn: sqlite3.Connection) -> None:
         print(f"  {cid:>2}  {name}")
     print("\nFor each merchant, enter a category id/name, 's' to skip, 'q' to quit.\n")
 
-    for merchant, n, total in rows:
+    for merchant, n, total, example, ids in rows:
         if merchant == "(no merchant)":
             continue
+        # An earlier answer may already have covered this group (substring).
+        marks = ",".join("?" * len(ids))
+        left = conn.execute(f"SELECT COUNT(*), COALESCE(SUM(amount),0) FROM transactions "
+                            f"WHERE id IN ({marks}) AND category_id IS NULL", ids).fetchone()
+        if not left[0]:
+            continue
+        n, total = left
+        hint = f"\n    e.g. {example[:90]}" if example and example != merchant else ""
         try:
-            ans = input(f"{merchant}  ({n} txn, {total:,} IDR) -> ").strip()
+            ans = input(f"{merchant}  ({n} txn, {total:,} IDR){hint}\n  -> ").strip()
         except EOFError:
             print("\n(no input available; exiting review)")
             break
@@ -193,13 +260,13 @@ def cmd_review(conn: sqlite3.Connection) -> None:
 
 
 def cmd_stats(conn: sqlite3.Connection) -> None:
-    total = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
-    uncat = conn.execute(
-        "SELECT COUNT(*) FROM transactions WHERE category_id IS NULL").fetchone()[0]
+    total = conn.execute("SELECT COUNT(*) FROM transactions WHERE type='expense'").fetchone()[0]
+    uncat = conn.execute("SELECT COUNT(*) FROM transactions "
+                         "WHERE category_id IS NULL AND type='expense'").fetchone()[0]
     mapped = conn.execute("SELECT COUNT(*) FROM merchant_category_map").fetchone()[0]
     cat = total - uncat
     pct = (cat / total * 100) if total else 0.0
-    print(f"Transactions       : {total}")
+    print(f"Spending rows      : {total}")
     print(f"  categorized      : {cat} ({pct:.1f}%)")
     print(f"  uncategorized    : {uncat}")
     print(f"merchant mappings  : {mapped}")
