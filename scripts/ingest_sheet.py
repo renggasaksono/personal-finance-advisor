@@ -66,6 +66,8 @@ def parse_date(raw: str) -> str | None:
 # Reuse the shared connection helper / default DB path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from init_db import DEFAULT_DB, connect  # noqa: E402
+from classify import is_transfer, load_context  # noqa: E402
+from pii import redact_field  # noqa: E402
 
 # Header alias -> canonical field name. Keys are lowercased.
 COLUMN_ALIASES = {
@@ -80,16 +82,48 @@ COLUMN_ALIASES = {
     "anggota": "family_member",
     "type": "type", "tipe": "type",
     "notes": "notes", "note": "notes", "catatan": "notes",
+    "balance": "balance", "saldo": "balance",
+    "db/cr": "direction", "d/k": "direction", "dk": "direction",
+    "debit/credit": "direction", "debit/kredit": "direction",
 }
 
+# Values of a debit/credit marker column -> transaction type. BCA's CSV export
+# leaves this column's header blank, so it is also detected by its values.
+_DIRECTION_VALUES = {"db": "expense", "d": "expense", "debit": "expense",
+                     "cr": "income", "k": "income", "kr": "income",
+                     "credit": "income", "kredit": "income"}
+
 VALID_TYPES = {"expense", "income", "transfer"}
+
+
+def _normalize_separators(s: str) -> str:
+    """Turn a digits-and-separators string into a float() literal.
+
+    - Both '.' and ',' present: whichever comes LAST is the decimal point
+      ('3.500.000,00' Indonesian, '1,000,000.00' English).
+    - One kind only: it groups thousands if it repeats or is followed by
+      exactly 3 digits ('3.500.000', '350,000', '1.250'); otherwise it is the
+      decimal point ('12,5', '5000.00'). IDR has no 3-digit decimals, so a
+      3-digit tail is always thousands.
+    """
+    has_dot, has_comma = "." in s, "," in s
+    if has_dot and has_comma:
+        dec, grp = (",", ".") if s.rfind(",") > s.rfind(".") else (".", ",")
+        return s.replace(grp, "").replace(dec, ".")
+    sep = "." if has_dot else "," if has_comma else None
+    if sep is None:
+        return s
+    if s.count(sep) > 1 or len(s) - s.rfind(sep) - 1 == 3:
+        return s.replace(sep, "")
+    return s.replace(sep, ".")
 
 
 def parse_amount(value) -> int | None:
     """Parse an IDR amount into an integer number of rupiah.
 
-    Handles plain numbers as well as Indonesian-formatted strings such as
-    'Rp 3.500.000', '3.500.000,00', or '350,000'.
+    Handles plain numbers and both separator conventions: Indonesian
+    ('Rp 3.500.000', '3.500.000,00') and English, as in BCA's CSV export
+    ('1,000,000.00', '350,000'). See _normalize_separators for the rule.
     """
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
@@ -108,17 +142,7 @@ def parse_amount(value) -> int | None:
     if not s:
         return None
 
-    has_dot, has_comma = "." in s, "," in s
-    if has_dot and has_comma:
-        # Indonesian: '.' thousands, ',' decimal -> 3.500.000,00
-        s = s.replace(".", "").replace(",", ".")
-    elif has_comma:
-        # Comma as decimal separator (IDR convention).
-        s = s.replace(",", ".")
-    elif has_dot:
-        # Dots as thousands separators -> drop them (IDR has no sub-rupiah).
-        s = s.replace(".", "")
-
+    s = _normalize_separators(s)
     try:
         amount = int(round(float(s)))
     except ValueError:
@@ -149,13 +173,30 @@ def read_sheet(path: Path, sheet: str | None) -> pd.DataFrame:
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Rename columns to canonical field names via COLUMN_ALIASES."""
+    """Rename columns to canonical field names via COLUMN_ALIASES, and find an
+    unlabelled debit/credit marker column (all values DB/CR) by its contents."""
     rename = {}
     for col in df.columns:
         key = str(col).strip().lower()
         if key in COLUMN_ALIASES:
             rename[col] = COLUMN_ALIASES[key]
+    if "direction" not in rename.values():
+        for col in df.columns:
+            if col in rename:
+                continue
+            vals = {str(v).strip().lower() for v in df[col]} - {""}
+            if vals and vals <= _DIRECTION_VALUES.keys():
+                rename[col] = "direction"
+                break
     return df.rename(columns=rename)
+
+
+def _clean_description(raw) -> str | None:
+    """One line per description ('TRSF E-BANKING DB / .../GOPAY TOPUP'), with
+    card/account numbers, phones and emails masked before it is stored."""
+    parts = [re.sub(r"\s+", " ", p).strip() for p in str(raw or "").splitlines()]
+    text = " / ".join(p for p in parts if p)
+    return redact_field(text) or None
 
 
 def ingest(path: Path, db_path: Path, default_account: str | None,
@@ -172,6 +213,12 @@ def ingest(path: Path, db_path: Path, default_account: str | None,
     conn = connect(db_path)
     try:
         categories, merchants, accounts = load_lookups(conn)
+        from categorize import load_map, match_category
+        mapping = load_map(conn)
+        ctx = load_context(conn)
+        # A debit/credit column means a bank export: apply bank-side rules.
+        source_type = "bank" if "direction" in df.columns else None
+        opening = None   # (date, balance before the first row), if derivable
 
         default_account_id = None
         if default_account:
@@ -200,7 +247,7 @@ def ingest(path: Path, db_path: Path, default_account: str | None,
                 skipped += 1
                 continue
 
-            merchant = (str(row.get("merchant", "")).strip() or None)
+            merchant = _clean_description(row.get("merchant", ""))
 
             # Resolve category: explicit category column first, then merchant map.
             category_id = None
@@ -211,9 +258,8 @@ def ingest(path: Path, db_path: Path, default_account: str | None,
                     print(f"  ! line {line}: unknown category {cat_name!r} "
                           f"(row kept uncategorized)")
             if category_id is None and merchant:
-                category_id = merchants.get(merchant.lower())
-            if category_id is None:
-                uncategorized.append(merchant or f"(line {line})")
+                category_id = (merchants.get(merchant.lower())
+                               or match_category(merchant, mapping))
 
             # Resolve account: per-row column, else the --account default.
             account_id = default_account_id
@@ -225,9 +271,24 @@ def ingest(path: Path, db_path: Path, default_account: str | None,
                 else:
                     account_id = resolved
 
-            txn_type = str(row.get("type", "")).strip().lower() or "expense"
-            if txn_type not in VALID_TYPES:
-                txn_type = "expense"
+            # Type: an explicit type column wins; else the DB/CR marker; then
+            # own-account moves (card payments, tracked top-ups) -> transfer.
+            explicit = str(row.get("type", "")).strip().lower()
+            marker = _DIRECTION_VALUES.get(str(row.get("direction", "")).strip().lower())
+            if explicit in VALID_TYPES:
+                txn_type = explicit
+            else:
+                txn_type = marker or "expense"
+                if is_transfer(merchant or "", source_type, ctx):
+                    txn_type = "transfer"
+            if category_id is None and txn_type == "expense":
+                uncategorized.append(merchant or f"(line {line})")
+
+            if opening is None and marker and "balance" in df.columns:
+                bal = parse_amount(row.get("balance"))
+                if bal is not None:
+                    sign = 1 if marker == "expense" else -1
+                    opening = (date, bal + sign * abs(amount))
 
             family_member = str(row.get("family_member", "")).strip() or None
             notes = str(row.get("notes", "")).strip() or None
@@ -239,16 +300,34 @@ def ingest(path: Path, db_path: Path, default_account: str | None,
         # --- Report -----------------------------------------------------
         print(f"\nParsed {len(rows_to_insert)} row(s) from {path.name} "
               f"({skipped} skipped).")
+        if rows_to_insert:
+            dates = sorted(r[0] for r in rows_to_insert)
+            print(f"  {dates[0]}..{dates[-1]}")
+            for t in ("income", "expense", "transfer"):
+                sel = [r for r in rows_to_insert if r[2] == t]
+                if sel:
+                    print(f"  {t:<8} {len(sel):>4} row(s)  {sum(r[1] for r in sel):>15,}")
+        if opening:
+            print(f"  Opening balance before {opening[0]}: {opening[1]:,}"
+                  + (f"  (set it with: setup.py account set {default_account!r} "
+                     f"--balance {opening[1]})" if default_account else ""))
         if unknown_accounts:
             print(f"  Unknown account name(s) (left NULL): "
                   f"{sorted(unknown_accounts)}")
         if uncategorized:
             from collections import Counter
-            top = Counter(uncategorized).most_common()
-            print(f"  Uncategorized ({len(uncategorized)}): "
-                  f"{', '.join(f'{m}×{n}' if n > 1 else m for m, n in top)}")
+            top = Counter(m[:40] for m in uncategorized).most_common(8)
+            print(f"  Uncategorized expenses: {len(uncategorized)} "
+                  f"(run categorize.py review after importing). Most frequent:")
+            for m, n in top:
+                print(f"    {n:>3} x {m}")
 
         if dry_run:
+            transfers = [r for r in rows_to_insert if r[2] == "transfer"]
+            if transfers:
+                print("  Transfers (own-account moves, not income or spending):")
+                for r in transfers:
+                    print(f"    {r[0]}  {r[1]:>13,}  {(r[4] or '')[:60]}")
             print("\n[dry-run] No rows written.")
             return 0
 

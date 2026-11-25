@@ -36,6 +36,9 @@ from ingest_core import commit_transactions          # noqa: E402
 from ingest_sheet import parse_amount, parse_date, load_lookups  # noqa: E402
 from categorize import load_map, match_category       # noqa: E402
 from pii import redact as redact_text, redact_field    # noqa: E402
+# Re-exported: callers and tests use ingest_pdf.classify_direction / DIRECTIONS.
+from classify import (DIRECTIONS, Context, classify_direction,  # noqa: E402,F401
+                      is_transfer, load_context)
 
 AI_MODEL_DEFAULT = os.getenv("PFA_AI_MODEL", "claude-opus-5")
 SOURCE_TYPES = ("cc", "ewallet", "bank", "other")
@@ -45,48 +48,6 @@ _DATE_RE = re.compile(
     r"\b(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})\b")
 # A currency-ish number: 1.250.000  /  75,000  /  12.500,00  /  Rp 5000
 _MONEY_RE = re.compile(r"(?:rp\.?\s*)?(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2})?|\d{4,}(?:[.,]\d{2})?)", re.I)
-# Credit markers -> money coming in. Deliberately strict: a standalone 'CR'
-# flag (not the substring in 'CREDIT'), or explicit refund-type terms.
-_CREDIT_RE = re.compile(
-    r"\bCR\b|\brefund\b|\bcashback\b|\breversal\b", re.I)
-
-# Moving money between your OWN accounts is a transfer, not spending/income.
-# Counting a card bill payment as an expense double-counts every card charge.
-# Card bill payment, as written on either statement:
-_CARD_PAYMENT_RE = re.compile(
-    r"\b(?:pembayaran|pemb\.?|bayar|byr|payment)\W*"
-    r"(?:kartu\s*kredit|credit\s*card|kk|cc)\b"        # bank side
-    r"|\b(?:pembayaran|payment)\W+(?:-\s*)?(?:terima\s*kasih|thank\s*you)",  # card side
-    re.I)
-# On a card statement, any 'payment' line is the bill being paid.
-_PAYMENT_WORD_RE = re.compile(r"\b(?:pembayaran|payment)\b", re.I)
-# On a bank statement, a card mentioned without a fee word is a bill payment.
-_CARD_MENTION_RE = re.compile(r"kartu\s*kredit|credit\s*card", re.I)
-_FEE_RE = re.compile(r"\b(?:biaya|fee|iuran|annual|bunga|interest|denda)\b", re.I)
-# Top-ups of your own e-wallet. 'TOP UP PULSA' (phone credit) stays an expense.
-_TOPUP_RE = re.compile(r"\btop[\s-]?up\b|\btopup\b", re.I)
-_EWALLET_RE = re.compile(
-    r"\b(?:gopay|go-pay|ovo|dana|shopee\s*pay|linkaja|link\s*aja|isaku|flip)\b", re.I)
-
-DIRECTIONS = ("expense", "income", "transfer")
-
-
-def classify_direction(line: str, source_type: str | None = None) -> str:
-    """'transfer' for money moved between your own accounts (card bill
-    payments, e-wallet top-ups), 'income' for credits, else 'expense'."""
-    if _CARD_PAYMENT_RE.search(line):
-        return "transfer"
-    if source_type == "cc" and _PAYMENT_WORD_RE.search(line):
-        return "transfer"
-    if (source_type == "bank" and _CARD_MENTION_RE.search(line)
-            and not _FEE_RE.search(line)):
-        return "transfer"
-    if _TOPUP_RE.search(line) and (source_type == "ewallet" or _EWALLET_RE.search(line)):
-        return "transfer"
-    if _CREDIT_RE.search(line):
-        return "income"
-    return "expense"
-
 # Indonesian (and a few English) month names -> number, keyed by first 3 letters.
 _ID_MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "mei": 5, "may": 5, "jun": 6,
@@ -235,7 +196,8 @@ def _money_tokens(line: str) -> list[tuple[str, int]]:
     return out
 
 
-def parse_statement_local(text: str, source_type: str | None = None) -> list[dict]:
+def parse_statement_local(text: str, source_type: str | None = None,
+                          ctx: Context | None = None) -> list[dict]:
     """Best-effort: a line with a date and >=1 amount is a transaction row.
 
     Takes the LAST money token as the amount (statements usually put it in the
@@ -266,7 +228,7 @@ def parse_statement_local(text: str, source_type: str | None = None) -> list[dic
             "date": date,
             "description": desc or None,
             "amount": abs(amount),
-            "direction": classify_direction(line, source_type),
+            "direction": classify_direction(line, source_type, ctx),
             "ambiguous": len(monies) > 1,
         })
     return rows
@@ -403,6 +365,7 @@ def ingest(paths: list[Path], db_path: Path, account: str | None,
     try:
         _cats, merchants_simple, accounts = load_lookups(conn)
         mapping = load_map(conn)
+        ctx = load_context(conn)
 
         account_id = None
         if account:
@@ -446,10 +409,10 @@ def ingest(paths: list[Path], db_path: Path, account: str | None,
                 parsed = parse_statement_ai(text, model)
                 # Backstop: the local rules win when they spot a transfer.
                 for p in parsed:
-                    if classify_direction(p["description"] or "", source_type) == "transfer":
+                    if is_transfer(p["description"] or "", source_type, ctx):
                         p["direction"] = "transfer"
             else:
-                parsed = parse_statement_local(text, source_type)
+                parsed = parse_statement_local(text, source_type, ctx)
             if not parsed:
                 print("  ! no transactions parsed. "
                       "Try --ai, or check the extracted text.")
